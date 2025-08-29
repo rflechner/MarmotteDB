@@ -1,6 +1,7 @@
 mod binary;
 mod binary_serializer;
 mod storage;
+mod document;
 
 use std::time::Instant;
 
