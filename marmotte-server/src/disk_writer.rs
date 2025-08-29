@@ -1,16 +1,12 @@
 use bytes::{BufMut, BytesMut};
-use serde::de;
 
 use crate::binary::*;
-use crc32fast::Hasher;
 use std::borrow::Cow;
 use std::cell::Cell;
-//use crate::binary_serializer::*;
 use std::fs::{File, OpenOptions};
-use std::io::{prelude::*, Bytes, SeekFrom};
+use std::io::{prelude::*, SeekFrom};
 use std::path::Path;
 use std::vec;
-use log::debug;
 
 #[derive(Clone, Copy)]
 pub struct RecordsFileMeta {
