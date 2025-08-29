@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use figlet_rs::FIGfont;
 use crate::disk_writer::DiskWriter;
 
@@ -14,11 +16,19 @@ fn main() {
 
     let mut w = DiskWriter::new("test3.data", 2048);
 
+    let mut iter_start = Instant::now();
+
     for i in 0..10_000 {
+
+
         w.add_record(format!("Record number {}!", i).as_bytes());
 
         if i % 1000 == 0 {
             println!("Wrote {} records", i);
+            let iter_elapsed = iter_start.elapsed();
+            
+            println!("Batch {} executed in {:?}", i, iter_elapsed);
+            iter_start = Instant::now();
         }
     }
 

@@ -124,7 +124,6 @@ impl DiskWriter {
 
         (&self.file).seek(SeekFrom::Start(0)).unwrap();
         (&self.file).write_all(&content).unwrap();
-        (&self.file).flush().unwrap();
         (&self.file).sync_all().unwrap();
     }
 
@@ -148,17 +147,14 @@ impl DiskWriter {
 
         (&self.file).seek(SeekFrom::Start(meta.position)).unwrap();
 
-        // TODO: un seul write_all
-        
-        (&self.file).write_all(&record.content_size.to_be_bytes()).unwrap();
-        (&self.file).write_all(&record.checksum.to_be_bytes()).unwrap();
-        (&self.file).write_all(&record.content).unwrap();
+        let mut buf = BytesMut::with_capacity(record.content_size as usize);
+        buf.put_u64(record.content_size);
+        buf.put_u32(record.checksum);
+        buf.put_slice(&record.content);
+        buf.put_u8(record.deleted as u8);
 
-        let deleted = [record.deleted as u8];
-        (&self.file).write_all(&deleted).unwrap();
+        (&self.file).write_all(&buf).unwrap();
 
-        // TODO: batch du flush et sync_all ?
-        (&self.file).flush().unwrap();
         (&self.file).sync_all().unwrap();
 
         meta.position += record.size();
