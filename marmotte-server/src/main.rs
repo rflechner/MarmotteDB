@@ -2,6 +2,7 @@ mod binary;
 mod binary_serializer;
 mod storage;
 mod document;
+mod indexes;
 
 use std::time::Instant;
 
