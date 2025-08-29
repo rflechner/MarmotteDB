@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use bytes::BytesMut;
 use crate::binary::BinaryReader;
-use crate::disk_writer::{Record, RecordsFileMeta};
+use crate::storage::disk_writer::{Record, RecordsFileMeta};
 
 pub struct DiskReaderOptions {
     pub max_record_size: u64

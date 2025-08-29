@@ -1,20 +1,18 @@
 mod binary;
 mod binary_serializer;
-mod disk_writer;
-mod disk_reader;
+mod storage;
 
 use std::time::Instant;
 
 use figlet_rs::FIGfont;
-use crate::disk_writer::DiskWriter;
-use crate::disk_reader::{DiskReader, DiskReaderOptions};
+use storage::disk_writer::DiskWriter;
+use storage::disk_reader::{DiskReader, DiskReaderOptions};
 
 fn main() {
     let font = FIGfont::standard().unwrap();
     let figure = font.convert("Marmotte DB");
     assert!(figure.is_some());
     println!("{}", figure.unwrap());
-
 
     let mut data_writer_1 = DiskWriter::new("test1.data", 2048);
     let mut data_writer_2 = DiskWriter::new("test2.data", 2048);
@@ -69,16 +67,16 @@ fn main() {
     let mut data_reader_2 = DiskReader::new("test2.data", DiskReaderOptions::create_default());
 
     println!("Reading records of test1.data ...");
-    
+
     for item in data_reader_1 {
         let text = String::from_utf8(item.content).unwrap();
         println!("{}", text);
     }
-    
+
     println!("Reading records of test2.data ...");
     for item in data_reader_2 {
         let text = String::from_utf8(item.content).unwrap();
         println!("{}", text);
     }
-    
+
 }
