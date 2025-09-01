@@ -12,3 +12,5 @@ Cargo.lock
 marmotte-server/target/
 
 *.data
+
+*.ix
