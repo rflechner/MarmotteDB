@@ -50,7 +50,7 @@ impl SortedIndexTableFragmentHeader {
 
 type ValueReader<T> = fn(BinaryReader) -> Result<T, String>;
 
-type ValueWriter<T> = fn(BinaryWriter, T) -> Result<(), String>;
+type ValueWriter<T> = fn(&mut BinaryWriter, T) -> Result<(), String>;
 
 impl SortedIndexFiles {
 
@@ -139,9 +139,12 @@ impl SortedIndexFiles {
         })
     }
 
-    fn read_offset<T: Ord>(&mut self, file: &mut File, offset: u32, read_value: ValueReader<T>) -> Result<FenseIndex<T>, String> {
+    fn read_offset<T: Ord>(&mut self, num: usize, offset: u32, read_value: ValueReader<T>) -> Result<FenseIndex<T>, String> {
         let after_header_offset_position = SortedIndexTableFragmentHeader::get_binary_size() as u64;
         let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_binary_size() as u64;
+
+        let handles = self.write_handles.as_mut_slice();
+        let file = &mut handles[num];
         file.seek(io::SeekFrom::Start(offset_position)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
 
         let mut buf = vec![0; FenseIndex::<T>::get_binary_size()];
@@ -160,16 +163,49 @@ impl SortedIndexFiles {
         })
     }
 
-    fn write_offset<T: Ord>(&mut self, file: &mut File, ix: FenseIndex<T>, offset: u32, write_value: ValueWriter<T>) -> Result<(), String> {
+    fn read_all_indexes<T: Ord>(&mut self, num: usize, offset: u32, read_value: ValueReader<T>) -> Result<Vec<FenseIndex<T>>, String> {
         let after_header_offset_position = SortedIndexTableFragmentHeader::get_binary_size() as u64;
         let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_binary_size() as u64;
+
+        let handles = self.write_handles.as_mut_slice();
+        let file = &mut handles[num];
+        file.seek(io::SeekFrom::Start(offset_position)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
+
+        let mut items = Vec::with_capacity(self.max_records_count_per_fragments as usize);
+        for _ in 0..self.max_records_count_per_fragments {
+
+            let mut buf = vec![0; FenseIndex::<T>::get_binary_size()];
+            file.read(&mut buf).unwrap();
+            let bytes = BytesMut::from(buf.as_slice());
+            let mut bin = BinaryReader::from(bytes);
+
+            let active = bin.read_bool()?;
+            let target = bin.read_u64()?;
+            let value = read_value(bin)?;
+
+            items.push(FenseIndex { active, target, value });
+        }
+
+        Ok(items)
+    }
+
+    fn write_offset<T: Ord>(&mut self, num: usize, ix: FenseIndex<T>, offset: u32, write_value: ValueWriter<T>) -> Result<(), String> {
+        let after_header_offset_position = SortedIndexTableFragmentHeader::get_binary_size() as u64;
+        let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_binary_size() as u64;
+
+        let handles = self.write_handles.as_mut_slice();
+        let file = &mut handles[num];
         file.seek(io::SeekFrom::Start(offset_position)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
 
         let mut bin = BinaryWriter::with_capacity(FenseIndex::<T>::get_binary_size());
         bin.write_bool(true);
         bin.write_u64(ix.target);
 
-        write_value(bin, ix.value)
+        write_value(&mut bin, ix.value)?;
+
+        let content = bin.buffer.freeze().to_vec();
+        
+        file.write_all(&content).map_err(|e| e.to_string())
     }
 }
 
@@ -190,8 +226,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_read_only_written_index_records() {
+        let folder = "test_folder/should_read_only_written_index_records";
+        if std::fs::exists(folder).unwrap() {
+            std::fs::remove_dir_all(folder).unwrap();
+        }
+
+        let mut files = SortedIndexFiles::new(folder.to_string(), 3, 10, 500).unwrap();
+        files.open_fragment::<String>(0).unwrap();
+
+        for i in 20u32..30u32 {
+            let item: FenseIndex<String> = FenseIndex { active: true, target: (100 * i as u64), value: format!("string value {i}") };
+            files.write_offset(0, item, i, move |bin, v| Ok(bin.write_string(v.as_str()))).unwrap();
+        }
+
+        let fetched_records = files.read_all_indexes(0, 0, move |mut bin| Ok(bin.read_string().unwrap())).unwrap();
+        let stored_values = fetched_records.iter().filter(|r| r.active).map(|r| r.value.clone()).collect::<Vec<String>>();
+
+        assert_eq!(10, stored_values.len());
+        assert_eq!("string value 20", stored_values[0]);
+        assert_eq!("string value 21", stored_values[1]);
+        assert_eq!("string value 22", stored_values[2]);
+        assert_eq!("string value 29", stored_values[9]);
+    }
+
+    #[test]
     fn should_write_and_read_index_file_header() {
-        let folder = "test_folder";
+        let folder = "test_folder/should_write_and_read_index_file_header";
 
         if std::fs::exists(folder).unwrap() {
             std::fs::remove_dir_all(folder).unwrap();
