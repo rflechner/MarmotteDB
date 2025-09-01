@@ -201,9 +201,6 @@ mod tests {
 
         files.open_fragment::<String>(0).unwrap();
 
-        // let handle = &mut files.write_handles[0];
-        // files.write_header(0).unwrap();
-
         let header = files.read_header(0).unwrap();
 
         assert_eq!(50, header.max_records_count);
