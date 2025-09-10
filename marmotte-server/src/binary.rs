@@ -94,7 +94,6 @@ impl BinaryReader {
                     Err(_) => Err(&"Failed to decode UTF8 string.")
                 }
             }
-
         }
     }
 
