@@ -1,18 +1,40 @@
 ﻿use std::fmt::Display;
 use crate::binary::{BinaryReader, BinaryWriter};
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use std::fs::{exists, File, OpenOptions};
 use std::io;
 use std::io::{Read, Seek, Write};
 use std::mem::size_of;
 
-pub struct FenseIndex<T: Ord> {
+pub trait BinarySizeable {
+    fn get_binary_size(&self) -> usize;
+}
+
+impl BinarySizeable for String {
+    fn get_binary_size(&self) -> usize {
+        size_of::<u64>() + self.len()
+    }
+}
+
+impl BinarySizeable for u32 {
+    fn get_binary_size(&self) -> usize {
+        size_of::<u32>()
+    }
+}
+
+impl BinarySizeable for u64 {
+    fn get_binary_size(&self) -> usize {
+        size_of::<u64>()
+    }
+}
+
+pub struct FenseIndex<T: Ord + BinarySizeable> {
     pub active: bool,
     pub target: u64,
     pub value: T,
 }
 
-impl<T: Ord> FenseIndex<T> {
+impl<T: Ord + BinarySizeable> FenseIndex<T> {
     pub fn new(target: u64, value: T) -> Self {
         Self {
             active: false,
@@ -21,9 +43,15 @@ impl<T: Ord> FenseIndex<T> {
         }
     }
 
-    fn get_binary_size() -> usize {
-        size_of::<bool>() + size_of::<u64>() + size_of::<T>()
+    fn get_prefix_binary_size() -> usize {
+        1 + size_of::<u64>()
     }
+
+    fn get_binary_size(&self) -> usize {
+        let prefix_size = 1 + size_of::<u64>(); // (active bool) + (target u64)
+        prefix_size + self.value.get_binary_size()
+    }
+
 }
 
 pub struct SortedIndexTableFragmentHeader<T: Ord + Clone> {
@@ -34,16 +62,23 @@ pub struct SortedIndexTableFragmentHeader<T: Ord + Clone> {
 }
 
 impl<T: Ord + Clone> SortedIndexTableFragmentHeader<T> {
-    pub fn get_binary_size() -> usize {
-        size_of::<u64>() + size_of::<u32>() + size_of::<u32>()
+    pub fn get_binary_size(value_binary_size: usize) -> usize {
+        size_of::<u32>() + size_of::<u32>() + value_binary_size + value_binary_size
     }
 }
 
-type ValueReader<T> = fn(&mut Box<File>) -> Result<T, String>;
+type ValueReader<T> = Box<dyn Fn(&mut Box<File>) -> Result<T, String>>;
 
-type ValueWriter<T> = fn(T) -> Result<Bytes, String>;
+type ValueWriter<T> = Box<dyn Fn(T) -> Result<Bytes, String>>;
 
-pub struct SortedIndexFiles<T: Ord + Clone> {
+pub struct ValueDefaultSizeInfo {
+    pub prefix_size: usize,
+    pub total_size: usize,
+}
+
+type ComputeValueDefaultSize = fn() -> ValueDefaultSizeInfo;
+
+pub struct SortedIndexFiles<T: Ord + Clone + BinarySizeable> {
     pub folder: String,
     pub max_incomplete_fragments_count: u32,
     pub shift_threshold: u32,
@@ -55,7 +90,7 @@ pub struct SortedIndexFiles<T: Ord + Clone> {
     pub write_value: ValueWriter<T>,
 }
 
-impl<T: Ord + Clone> SortedIndexFiles<T> {
+impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
     pub fn new_with_defaults(folder: String, default_value: T, read_value: ValueReader<T>, write_value: ValueWriter<T>) -> Result<Self, String> {
         Self::new(folder, default_value, read_value, write_value, 10, 10_000, 100_000)
     }
@@ -104,9 +139,10 @@ impl<T: Ord + Clone> SortedIndexFiles<T> {
             .map_err(|e| e.to_string())?;
 
         if first_file_use {
+
             let default_value = self.default_value.clone();
 
-            let record_size = FenseIndex::<T>::get_binary_size() as u32;
+            let record_size = (FenseIndex::<T>::get_prefix_binary_size() + default_value.get_binary_size()) as u32;
             let initial_size = record_size * self.max_records_count_per_fragments;
 
             file.set_len(initial_size as u64).map_err(|e| e.to_string())?;
@@ -129,7 +165,7 @@ impl<T: Ord + Clone> SortedIndexFiles<T> {
                 min_value: min_value.clone(),
                 max_value: max_value.clone()
         };
-        let write_value = self.write_value;
+        let write_value = &self.write_value;
 
         let handles = self.write_handles.as_mut_slice();
         let file = &mut handles[num];
@@ -150,7 +186,7 @@ impl<T: Ord + Clone> SortedIndexFiles<T> {
     }
 
     fn read_header(&mut self, num: usize) -> Result<SortedIndexTableFragmentHeader<T>, String> {
-        let read_value = self.read_value;
+        let read_value = &self.read_value;
         let mut max_records_count = [0u8; 4];
         let mut shift_threshold = [0u8; 4];
 
@@ -178,16 +214,17 @@ impl<T: Ord + Clone> SortedIndexFiles<T> {
     }
 
     fn read_offset(&mut self, num: usize, offset: u32) -> Result<FenseIndex<T>, String> {
-        let after_header_offset_position = SortedIndexTableFragmentHeader::<T>::get_binary_size() as u64;
-        let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_binary_size() as u64;
+        let record_binary_size = self.default_value.get_binary_size();
+        let after_header_offset_position = SortedIndexTableFragmentHeader::<T>::get_binary_size(record_binary_size) as u64;
+        let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_prefix_binary_size() as u64;
 
         let handles = self.write_handles.as_mut_slice();
-        let read_value = self.read_value;
+        let read_value = &self.read_value;
 
         let file = &mut handles[num];
         file.seek(io::SeekFrom::Start(offset_position)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
 
-        let mut buf = vec![0; FenseIndex::<T>::get_binary_size()];
+        let mut buf = vec![0; FenseIndex::<T>::get_prefix_binary_size()];
         file.read(&mut buf).unwrap();
         let bytes = BytesMut::from(buf.as_slice());
         let mut bin = BinaryReader::from(bytes);
@@ -203,73 +240,97 @@ impl<T: Ord + Clone> SortedIndexFiles<T> {
         })
     }
 
-    fn read_all_indexes(&mut self, num: usize, offset: u32) -> Result<Vec<FenseIndex<T>>, String> {
-        let after_header_offset_position = SortedIndexTableFragmentHeader::<T>::get_binary_size() as u64;
-        let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_binary_size() as u64;
+    fn read_all_indexes(&mut self, num: usize, offset: u64, compute_value_default_size: ComputeValueDefaultSize) -> Result<Vec<FenseIndex<T>>, String> {
+        let header_range_value_binary_size = self.default_value.get_binary_size();
+        let after_header_offset_position = SortedIndexTableFragmentHeader::<T>::get_binary_size(header_range_value_binary_size) as u64;
+
+        let record_binary_size = compute_value_default_size();
+        let offset_position = after_header_offset_position + offset * record_binary_size.total_size as u64;
 
         let handles = self.write_handles.as_mut_slice();
         let file = &mut handles[num];
         file.seek(io::SeekFrom::Start(offset_position)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
 
-        let read_value = self.read_value;
+        let read_value = &self.read_value;
 
         let mut items = Vec::with_capacity(self.max_records_count_per_fragments as usize);
         for _ in 0..self.max_records_count_per_fragments {
-            let mut buf = vec![0; FenseIndex::<T>::get_binary_size()];
+            let postion_on_loop_start = file.stream_position().map_err(|e| e.to_string())?;
+
+            let mut buf = vec![0; record_binary_size.prefix_size];
             file.read(&mut buf).unwrap();
             let bytes = BytesMut::from(buf.as_slice());
             let mut bin = BinaryReader::from(bytes);
 
             let active = bin.read_bool()?;
             let target = bin.read_u64()?;
+            let postion_before_value = file.stream_position().map_err(|e| e.to_string())?;
             let value = read_value(file)?;
+            let postion_after_record = file.stream_position().map_err(|e| e.to_string())?;
 
-            items.push(FenseIndex { active, target, value });
+            if active {
+                items.push(FenseIndex { active, target, value });
+            }
         }
 
         Ok(items)
     }
 
     fn write_offset(&mut self, num: usize, ix: FenseIndex<T>, offset: u32) -> Result<(), String> {
-        let after_header_offset_position = SortedIndexTableFragmentHeader::<T>::get_binary_size() as u64;
-        let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_binary_size() as u64;
+        let header = self.read_header(num)?;
+        let mut min_value = header.min_value.clone();
+        let mut max_value = header.max_value.clone();
+        if ix.value < header.min_value || self.default_value == header.min_value {
+            min_value = ix.value.clone()
+        }
+        if ix.value > header.max_value || self.default_value == header.max_value {
+            max_value = ix.value.clone()
+        }
+
+        let record_binary_size = self.default_value.get_binary_size();
+        let after_header_offset_position = SortedIndexTableFragmentHeader::<T>::get_binary_size(record_binary_size) as u64;
+        let index_size = ix.get_binary_size();
+        let offset_position = after_header_offset_position + (offset as u64) * index_size as u64;
 
         let handles = self.write_handles.as_mut_slice();
-        let write_value = self.write_value;
+        let write_value = &self.write_value;
 
         let file = &mut handles[num];
         file.seek(io::SeekFrom::Start(offset_position)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
 
-        let mut bin = BinaryWriter::with_capacity(FenseIndex::<T>::get_binary_size());
+        let mut bin = BinaryWriter::with_capacity(FenseIndex::<T>::get_prefix_binary_size());
         bin.write_bool(true);
         bin.write_u64(ix.target);
 
         let b = write_value(ix.value)?;
         let bytes = b.iter().as_slice();
         bin.write_bytes(bytes);
+
         let content = bin.buffer.freeze().to_vec();
-        file.write_all(&content).map_err(|e| e.to_string())
+        file.write_all(&content).map_err(|e| e.to_string())?;
+
+        let position = file.stream_position().map_err(|e| e.to_string())?;
+
+        file.sync_all().map_err(|e| e.to_string())?;
+
+        self.write_header(num, min_value, max_value)
     }
 }
 
-pub struct SortedIndexTableFragment<T: Ord + Clone> {
+pub struct SortedIndexTableFragment<T: Ord + Clone + BinarySizeable> {
     pub files: SortedIndexFiles<T>,
     // pub header: SortedIndexTableFragmentHeader<T>
 }
 
-impl<T: Ord + Clone + Display> SortedIndexTableFragment<T> {
+impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexTableFragment<T> {
 
     pub fn new(files: SortedIndexFiles<T>) -> Self {
         SortedIndexTableFragment { files }
     }
 
-    pub fn get_index_file_num(&mut self, ix: FenseIndex<T>) -> Result<usize, String> {
+    pub fn get_index_file_num_for_store(&mut self, ix: FenseIndex<T>) -> Result<usize, String> {
         for i in 0..self.files.write_handles.len() {
             let header = self.files.read_header(i)?;
-            let min = header.min_value.to_string();
-            let max = header.max_value.to_string();
-            println!("Header [{}-{}]", min, max);
-
             if ix.value > header.min_value && ix.value < header.max_value {
                 return Ok(i);
             }
@@ -284,81 +345,113 @@ impl<T: Ord + Clone + Display> SortedIndexTableFragment<T> {
 
 }
 
-pub fn default_string_writer() -> ValueWriter<String> {
-    move |v| {
-        let mut bin = BinaryWriter::with_capacity(v.len() + 1);
-        bin.write_string(v.as_str());
-        Ok(bin.buffer.freeze())
+pub fn pad_string(s: String, pad: char, len: usize) -> String {
+    let mut result: String = s.chars().take(len).collect();
+    let current_len = result.chars().count();
+
+    for _ in current_len..len {
+        result.push(pad);
     }
+    result
 }
 
-pub fn default_string_reader() -> ValueReader<String> {
-    move |file| {
-        let position = file.stream_position().map_err(|e| e.to_string())?;
-        let file_length: u64 = file.metadata().map_err(|e| e.to_string())?.len();
-        if file_length < position {
-            return Err(String::from("Failed to read value due to buffer overflow."))
-        }
 
-        let mut bl: [u8; 8] = Default::default();
-        let read_bytes_count = file.read(&mut bl).map_err(|e| e.to_string())?;
-        if read_bytes_count != 8 {
-            return Err(String::from("Could not read 8 bytes from file. File is too short."))
-        }
+pub fn default_string_writer(index_value_size: usize) -> ValueWriter<String> {
+    Box::new(
+        move | v | {
+            let v = pad_string(v, ' ', index_value_size);
+            let bin = BinaryWriter::with_capacity(index_value_size + 1); // +1 because of the length prefix
+            let bytes = v.as_bytes();
+            let len = bytes.len() as u64;
+            let len_bytes = len.to_be_bytes();
+            let mut buffer = bin.buffer;
+            buffer.put_slice(&len_bytes);
+            buffer.put_slice(&bytes);
 
-        let text_len = usize::from_be_bytes(bl);
-        let max_possible_len = file_length - position;
-        if text_len > max_possible_len as usize {
-            return Err(String::from("Corrupted file. Text length is greater than file length."));
+            Ok(buffer.freeze())
         }
+    )
+}
 
-        let mut buf = vec![0; text_len];
-        file.read(buf.as_mut_slice()).map_err(|e| e.to_string())?;
-        match String::from_utf8(buf) {
-            Ok(s) =>
-                Ok(s),
-            Err(e) => Err(format!("Failed to read value due to invalid UTF-8 sequence: {}", e))
+pub fn default_string_reader(index_value_size: usize) -> ValueReader<String> {
+    Box::new(
+        move |file| {
+            let position = file.stream_position().map_err(|e| e.to_string())?;
+            let file_length: u64 = file.metadata().map_err(|e| e.to_string())?.len();
+
+            let mut bl: [u8; 8] = Default::default();
+            let read_bytes_count = file.read(&mut bl).map_err(|e| e.to_string())?;
+            if read_bytes_count != 8 {
+                return Err(String::from("Could not read 8 bytes from file. File is too short."))
+            }
+
+            let text_len = usize::from_be_bytes(bl);
+            let max_possible_len = file_length - position;
+            if text_len > max_possible_len as usize {
+                return Err(String::from("Corrupted file. Text length is greater than file length."));
+            }
+            if text_len > index_value_size {
+                return Err(String::from("Corrupted file. Text length is greater than index value size."));
+            }
+
+            let mut buf = vec![0; text_len];
+            let read_bytes_count = file.read(buf.as_mut_slice()).map_err(|e| e.to_string())?;
+            if read_bytes_count != text_len {
+                return Err(String::from(format!("Could not read {text_len} bytes from file (read {read_bytes_count} bytes instead).")))
+            }
+
+            match String::from_utf8(buf) {
+                Ok(s) => Ok(s),
+                Err(e) => Err(format!("Failed to read value due to invalid UTF-8 sequence: {}", e))
+            }
         }
-    }
+    )
 }
 
 pub fn default_u32_writer() -> ValueWriter<u32> {
-    move |v| {
+    Box::new(
+        move |v| {
             let mut bin = BinaryWriter::with_capacity(size_of::<u32>());
             bin.write_u32(v);
             Ok(bin.buffer.freeze())
         }
+    )
 }
 
 pub fn default_u32_reader() -> ValueReader<u32> {
-    move |file| {
-        let mut buf = vec![0; size_of::<u32>()];
-        file.read(buf.as_mut_slice()).map_err(|e| e.to_string())?;
-        let bytes = BytesMut::from(buf.as_slice());
-        let mut bin = BinaryReader::from(bytes);
-        let value = bin.read_u32()?;
-        Ok(value)
-    }
+    Box::new(
+        move |file| {
+            let mut buf = vec![0; size_of::<u32>()];
+            file.read(buf.as_mut_slice()).map_err(|e| e.to_string())?;
+            let bytes = BytesMut::from(buf.as_slice());
+            let mut bin = BinaryReader::from(bytes);
+            let value = bin.read_u32()?;
+            Ok(value)
+        }
+    )
 }
 
 pub fn default_u64_writer() -> ValueWriter<u64> {
-    move |v| {
-        let mut bin = BinaryWriter::with_capacity(size_of::<u64>());
-        bin.write_u64(v);
-        Ok(bin.buffer.freeze())
-    }
+    Box::new(
+        move |v| {
+            let mut bin = BinaryWriter::with_capacity(size_of::<u64>());
+            bin.write_u64(v);
+            Ok(bin.buffer.freeze())
+        }
+    )
 }
 
 pub fn default_u64_reader() -> ValueReader<u64> {
-    move |mut file| {
-        let mut buf = vec![0; size_of::<u64>()];
-        file.read(buf.as_mut_slice()).map_err(|e| e.to_string())?;
-        let bytes = BytesMut::from(buf.as_slice());
-        let mut bin = BinaryReader::from(bytes);
-        Ok(bin.read_u64()?)
-    }
+    Box::new(
+        move |mut file| {
+            let mut buf = vec![0; size_of::<u64>()];
+            file.read(buf.as_mut_slice()).map_err(|e| e.to_string())?;
+            let bytes = BytesMut::from(buf.as_slice());
+            let mut bin = BinaryReader::from(bytes);
+            Ok(bin.read_u64()?)
+        }
+    )
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -371,10 +464,12 @@ mod tests {
             std::fs::remove_dir_all(folder).unwrap();
         }
 
-        let read_value: ValueReader<String> = default_string_reader();
-        let write_value: ValueWriter<String> = default_string_writer();
+        let read_value: ValueReader<String> = default_string_reader(200);
+        let write_value: ValueWriter<String> = default_string_writer(200);
 
-        let mut files = SortedIndexFiles::<String>::new(folder.to_string(), String::from(""), read_value, write_value, 3, 10, 1000).unwrap();
+        let default_value = String::from("");
+        let default_value = pad_string(default_value, ' ', 200);
+        let mut files = SortedIndexFiles::<String>::new(folder.to_string(), default_value, read_value, write_value, 3, 10, 1000).unwrap();
 
         for num in 0..10 {
             files.open_fragment(num).unwrap();
@@ -383,15 +478,26 @@ mod tests {
 
             for i in num..(num+20) {
                 let v = i * 10;
-                let item: FenseIndex<String> = FenseIndex { active: true, target: 100 * i as u64, value: format!("string value {letter} - {v}") };
-                files.write_offset(0, item, i as u32).unwrap();
+                let value = format!("string value {letter} - {v}");
+                let value = pad_string(value, ' ', 200);
+                let item: FenseIndex<String> = FenseIndex { active: true, target: 100 * i as u64, value };
+                files.write_offset(num, item, i as u32).unwrap();
             }
         }
 
-        let mut table_fragment = SortedIndexTableFragment::<String>::new(files);
-        let index_file_num = table_fragment.get_index_file_num(FenseIndex { active: true, target: 100, value: String::from("string value d 25") }).unwrap();
+        // files.write_header(0, String::from(("string value a - 0")), String::from(("string value k - 300"))).unwrap();
 
-        assert_eq!(index_file_num, 3);
+        let mut table_fragment = SortedIndexTableFragment::<String>::new(files);
+        // let header = table_fragment.files.read_header(0).unwrap();
+
+        let ix1 = FenseIndex { active: true, target: 100, value: String::from("string value d - 15") };
+        let index_file_num_1 = table_fragment.get_index_file_num_for_store(ix1).unwrap();
+
+        let ix2 = FenseIndex { active: true, target: 100, value: String::from("string value g - 20") };
+        let index_file_num_2 = table_fragment.get_index_file_num_for_store(ix2).unwrap();
+
+        assert_eq!(index_file_num_1, 3);
+        assert_eq!(index_file_num_2, 6);
     }
 
     #[test]
@@ -401,30 +507,38 @@ mod tests {
             std::fs::remove_dir_all(folder).unwrap();
         }
 
-        let read_value: ValueReader<String> = default_string_reader();
-        let write_value: ValueWriter<String> = default_string_writer();
+        let read_value: ValueReader<String> = default_string_reader(200);
+        let write_value: ValueWriter<String> = default_string_writer(200);
 
-        let mut files = SortedIndexFiles::<String>::new(folder.to_string(), String::from(""), read_value, write_value, 3, 10, 500).unwrap();
+        let default_value = String::from("");
+        let default_value = pad_string(default_value, ' ', 200);
+
+        let mut files = SortedIndexFiles::<String>::new(folder.to_string(), default_value, read_value, write_value, 3, 10, 500).unwrap();
         files.open_fragment(0).unwrap();
 
         for i in 20u32..30u32 {
-            let item: FenseIndex<String> = FenseIndex { active: true, target: (100 * i as u64), value: format!("string value {i}") };
+            let value = format!("string value {i}");
+            let value = pad_string(value, ' ', 200);
+            let item: FenseIndex<String> = FenseIndex { active: true, target: (100 * i as u64), value };
             files.write_offset(0, item, i).unwrap();
         }
 
-        let fetched_records = files.read_all_indexes(0, 0).unwrap();
+        let fetched_records = files.read_all_indexes(0, 20, move || {
+            let ix: FenseIndex<String> = FenseIndex { active: true, target: 0, value: pad_string(String::from(""), ' ', 200) };
+            ValueDefaultSizeInfo { prefix_size: FenseIndex::<String>::get_prefix_binary_size(), total_size: ix.get_binary_size() }
+        }).unwrap();
         let stored_values = fetched_records.iter().filter(|r| r.active).map(|r| r.value.clone()).collect::<Vec<String>>();
 
         assert_eq!(10, stored_values.len());
-        assert_eq!("string value 20", stored_values[0]);
-        assert_eq!("string value 21", stored_values[1]);
-        assert_eq!("string value 22", stored_values[2]);
-        assert_eq!("string value 29", stored_values[9]);
+        assert_eq!("string value 20", stored_values[0].trim());
+        assert_eq!("string value 21", stored_values[1].trim());
+        assert_eq!("string value 22", stored_values[2].trim());
+        assert_eq!("string value 29", stored_values[9].trim());
     }
 
     #[test]
     fn should_read_only_written_u32_index_records() {
-        let folder = "test_folder/should_read_only_written_index_records";
+        let folder = "test_folder/should_read_only_written_u32_index_records";
         if std::fs::exists(folder).unwrap() {
             std::fs::remove_dir_all(folder).unwrap();
         }
@@ -440,7 +554,10 @@ mod tests {
             files.write_offset(0, item, i).unwrap();
         }
 
-        let fetched_records = files.read_all_indexes(0, 0).unwrap();
+        let fetched_records = files.read_all_indexes(0, 20, move || {
+            let ix: FenseIndex<u32> = FenseIndex { active: true, target: 0, value: 0 };
+            ValueDefaultSizeInfo { prefix_size: FenseIndex::<u32>::get_prefix_binary_size(), total_size: ix.get_binary_size() }
+        }).unwrap();
         let stored_values = fetched_records.iter().filter(|r| r.active).map(|r| r.value.clone()).collect::<Vec<u32>>();
 
         assert_eq!(10, stored_values.len());
@@ -458,18 +575,18 @@ mod tests {
             std::fs::remove_dir_all(folder).unwrap();
         }
 
-        let read_value: ValueReader<String> = default_string_reader();
-        let write_value: ValueWriter<String> = default_string_writer();
+        let read_value: ValueReader<String> = default_string_reader(200);
+        let write_value: ValueWriter<String> = default_string_writer(200);
 
         let mut files = SortedIndexFiles::<String>::new(folder.to_string(), String::from(""), read_value, write_value, 3, 10, 50).unwrap();
         files.open_fragment(0).unwrap();
 
         let header = files.read_header(0).unwrap();
 
-        assert_eq!(50, header.max_records_count);
-        assert_eq!(10, header.shift_threshold);
-        assert_eq!("", header.min_value.as_str());
-        assert_eq!("", header.max_value.as_str());
+        assert_eq!(50, header.max_records_count, "Max records count should be 50");
+        assert_eq!(10, header.shift_threshold, "Shift thresold should be 10");
+        assert_eq!("", header.min_value.as_str().trim(), "Min value should be empty");
+        assert_eq!("", header.max_value.as_str().trim(), "Max value should be empty");
     }
 
     #[test]
