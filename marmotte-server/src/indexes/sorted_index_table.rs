@@ -335,7 +335,7 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexTableFragment<T> {
 
 }
 
-pub fn pad_string(s: String, pad: char, len: usize) -> String {
+pub fn pad_or_truncate_string(s: String, pad: char, len: usize) -> String {
     let mut result: String = s.chars().take(len).collect();
     let current_len = result.chars().count();
 
@@ -349,7 +349,7 @@ pub fn pad_string(s: String, pad: char, len: usize) -> String {
 pub fn default_string_writer(index_value_size: usize) -> ValueWriter<String> {
     Box::new(
         move | v | {
-            let v = pad_string(v, ' ', index_value_size);
+            let v = pad_or_truncate_string(v, ' ', index_value_size);
             let bin = BinaryWriter::with_capacity(index_value_size + 1); // +1 because of the length prefix
             let bytes = v.as_bytes();
             let len = bytes.len() as u64;
@@ -458,7 +458,7 @@ mod tests {
         let write_value: ValueWriter<String> = default_string_writer(200);
 
         let default_value = String::from("");
-        let default_value = pad_string(default_value, ' ', 200);
+        let default_value = pad_or_truncate_string(default_value, ' ', 200);
         let mut files = SortedIndexFiles::<String>::new(folder.to_string(), default_value, read_value, write_value, 3, 10, 1000).unwrap();
 
         for num in 0..10 {
@@ -469,7 +469,7 @@ mod tests {
             for i in num..(num+20) {
                 let v = i * 10;
                 let value = format!("string value {letter} - {v}");
-                let value = pad_string(value, ' ', 200);
+                let value = pad_or_truncate_string(value, ' ', 200);
                 let item: FenseIndex<String> = FenseIndex { active: true, target: 100 * i as u64, value };
                 files.write_offset(num, item, i as u32).unwrap();
             }
@@ -501,20 +501,20 @@ mod tests {
         let write_value: ValueWriter<String> = default_string_writer(200);
 
         let default_value = String::from("");
-        let default_value = pad_string(default_value, ' ', 200);
+        let default_value = pad_or_truncate_string(default_value, ' ', 200);
 
         let mut files = SortedIndexFiles::<String>::new(folder.to_string(), default_value, read_value, write_value, 3, 10, 500).unwrap();
         files.open_fragment(0).unwrap();
 
         for i in 20u32..30u32 {
             let value = format!("string value {i}");
-            let value = pad_string(value, ' ', 200);
+            let value = pad_or_truncate_string(value, ' ', 200);
             let item: FenseIndex<String> = FenseIndex { active: true, target: (100 * i as u64), value };
             files.write_offset(0, item, i).unwrap();
         }
 
         let fetched_records = files.read_all_indexes(0, 20, move || {
-            let ix: FenseIndex<String> = FenseIndex { active: true, target: 0, value: pad_string(String::from(""), ' ', 200) };
+            let ix: FenseIndex<String> = FenseIndex { active: true, target: 0, value: pad_or_truncate_string(String::from(""), ' ', 200) };
             ValueDefaultSizeInfo { prefix_size: FenseIndex::<String>::get_prefix_binary_size(), total_size: ix.get_binary_size() }
         }).unwrap();
         let stored_values = fetched_records.iter().filter(|r| r.active).map(|r| r.value.clone()).collect::<Vec<String>>();
