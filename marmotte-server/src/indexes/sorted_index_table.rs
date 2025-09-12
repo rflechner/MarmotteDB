@@ -55,6 +55,7 @@ impl<T: Ord + BinarySizeable> FenseIndex<T> {
 }
 
 pub struct SortedIndexTableFragmentHeader<T: Ord + Clone> {
+    pub records_count: u32,
     pub max_records_count: u32,
     pub shift_threshold: u32,
     pub min_value: T,
@@ -63,7 +64,7 @@ pub struct SortedIndexTableFragmentHeader<T: Ord + Clone> {
 
 impl<T: Ord + Clone> SortedIndexTableFragmentHeader<T> {
     pub fn get_binary_size(value_binary_size: usize) -> usize {
-        size_of::<u32>() + size_of::<u32>() + value_binary_size + value_binary_size
+        size_of::<u32>() + size_of::<u32>() + size_of::<u32>() + value_binary_size + value_binary_size
     }
 }
 
@@ -80,19 +81,46 @@ type ComputeValueDefaultSize = fn() -> ValueDefaultSizeInfo;
 
 pub struct SortedIndexFiles<T: Ord + Clone + BinarySizeable> {
     pub folder: String,
+
+    // if we have more than max_incomplete_fragments_count fragments, we compact the fragment.
     pub max_incomplete_fragments_count: u32,
+
+    // if we must insert an index record, we shift all the records to the right by this amount.
+    // But if the number of records to shift is bigger than shift_threshold, we will create a new fragment.
     pub shift_threshold: u32,
+
+    // If a fragment has more than max_records_count records, we will create a new fragment.
     pub max_records_count_per_fragments: u32,
+
     pub write_handles: Vec<Box<File>>,
-    pub fragment_count: Box<u32>,
+    pub fragment_count: usize,
+
+    // The default value is used when we have to create a new fragment for min_value and max_value range.
     pub default_value: T,
+
     pub read_value: ValueReader<T>,
     pub write_value: ValueWriter<T>,
 }
 
-impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
+impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
     pub fn new_with_defaults(folder: String, default_value: T, read_value: ValueReader<T>, write_value: ValueWriter<T>) -> Result<Self, String> {
         Self::new(folder, default_value, read_value, write_value, 10, 10_000, 100_000)
+    }
+
+    pub fn count_fragments_in_folder(folder: String) -> Result<usize, String> {
+        if !std::fs::exists(folder.clone()).map_err(|e| e.to_string())?{
+            return Err(String::from(format!("Folder {} does not exist", folder)));
+        }
+
+        let entries = std::fs::read_dir(folder.clone()).map_err(|e| e.to_string())?;
+        let fragment_count = entries
+            .filter_map(|r| r.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|f| f.extension().map(|e| e == "ix").unwrap_or(false))
+            .count();
+
+        Ok(fragment_count)
     }
 
     pub fn new(folder: String,
@@ -105,13 +133,7 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
 
         std::fs::create_dir_all(folder.clone()).map_err(|e| e.to_string())?;
 
-        let entries = std::fs::read_dir(folder.clone()).map_err(|e| e.to_string())?;
-        let fragment_count = entries
-            .filter_map(|r| r.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .filter(|f| f.extension().map(|e| e == "ix").unwrap_or(false))
-            .count() as u32;
+        let fragment_count = SortedIndexFiles::<T>::count_fragments_in_folder(folder.clone())?;
 
         Ok(Self {
             folder,
@@ -119,10 +141,10 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
             shift_threshold,
             max_records_count_per_fragments,
             write_handles: Vec::new(),
-            fragment_count: Box::new(fragment_count),
+            fragment_count,
             default_value,
             read_value,
-            write_value,
+            write_value
         })
     }
     
@@ -139,17 +161,19 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
             .map_err(|e| e.to_string())?;
 
         if first_file_use {
-
             let default_value = self.default_value.clone();
-
-            let record_size = (FenseIndex::<T>::get_prefix_binary_size() + default_value.get_binary_size()) as u32;
-            let initial_size = record_size * self.max_records_count_per_fragments;
+            let default_value_size = default_value.get_binary_size();
+            let record_size = (FenseIndex::<T>::get_prefix_binary_size() + default_value_size) as u32;
+            let header_size = SortedIndexTableFragmentHeader::<T>::get_binary_size(default_value_size) as u32;
+            let initial_size = header_size + record_size * self.max_records_count_per_fragments;
 
             file.set_len(initial_size as u64).map_err(|e| e.to_string())?;
 
             self.write_handles.push(Box::new(file));
 
-            self.write_header(num, default_value.clone(), default_value.clone())?;
+            self.write_header(num, default_value.clone(), default_value.clone(), 0)?;
+
+            self.fragment_count += 1;
         }
         else {
             self.write_handles.push(Box::new(file));
@@ -157,13 +181,20 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
 
         Ok(())
     }
+    
+    pub fn append_fragment(&mut self) -> Result<usize, String> {
+        self.open_fragment(self.fragment_count)?;
 
-    fn write_header(&mut self, num: usize, min_value: T, max_value: T) -> Result<(), String> {
+        Ok(self.fragment_count)
+    }
+
+    fn write_header(&mut self, num: usize, min_value: T, max_value: T, records_count: u32) -> Result<(), String> {
         let header = SortedIndexTableFragmentHeader {
                 max_records_count: self.max_records_count_per_fragments,
                 shift_threshold: self.shift_threshold,
                 min_value: min_value.clone(),
-                max_value: max_value.clone()
+                max_value: max_value.clone(),
+                records_count
         };
         let write_value = &self.write_value;
 
@@ -172,6 +203,7 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
 
         file.seek(io::SeekFrom::Start(0)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
         file.write(&header.max_records_count.to_le_bytes()).map_err(|e| e.to_string())?;
+        file.write(&header.records_count.to_le_bytes()).map_err(|e| e.to_string())?;
         file.write(&header.shift_threshold.to_le_bytes()).map_err(|e| e.to_string())?;
 
         let b = write_value(min_value)?;
@@ -188,6 +220,7 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
     fn read_header(&mut self, num: usize) -> Result<SortedIndexTableFragmentHeader<T>, String> {
         let read_value = &self.read_value;
         let mut max_records_count = [0u8; 4];
+        let mut records_count = [0u8; 4];
         let mut shift_threshold = [0u8; 4];
 
         let handles = self.write_handles.as_mut_slice();
@@ -195,6 +228,7 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
 
         file.seek(io::SeekFrom::Start(0)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
         file.read(&mut max_records_count).map_err(|e| e.to_string())?;
+        file.read(&mut records_count).map_err(|e| e.to_string())?;
         file.read(&mut shift_threshold).map_err(|e| e.to_string())?;
 
         let mut buf = Vec::new();
@@ -207,6 +241,7 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
 
         Ok(SortedIndexTableFragmentHeader {
             max_records_count: u32::from_le_bytes(max_records_count),
+            records_count: u32::from_le_bytes(records_count),
             shift_threshold: u32::from_le_bytes(shift_threshold),
             min_value,
             max_value
@@ -254,7 +289,10 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
         let read_value = &self.read_value;
 
         let mut items = Vec::with_capacity(self.max_records_count_per_fragments as usize);
-        for _ in 0..self.max_records_count_per_fragments {
+        for i in offset .. self.max_records_count_per_fragments as u64 {
+
+            let position_before_read = file.stream_position().map_err(|e| e.to_string())?;
+
             let mut buf = vec![0; record_binary_size.prefix_size];
             file.read(&mut buf).unwrap();
             let bytes = BytesMut::from(buf.as_slice());
@@ -262,26 +300,22 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
 
             let active = bin.read_bool()?;
             let target = bin.read_u64()?;
-            let value = read_value(file)?;
-            if active {
-                items.push(FenseIndex { active, target, value });
+            match read_value(file) {
+                Ok(value) => {
+                    if active {
+                        items.push(FenseIndex { active, target, value });
+                    }
+                },
+                Err(e) => {
+                    return Err(String::from(format!("Failed to read value at offset {i}: {e}")));
+                }
             }
         }
 
         Ok(items)
     }
 
-    fn write_offset(&mut self, num: usize, ix: FenseIndex<T>, offset: u32) -> Result<(), String> {
-        let header = self.read_header(num)?;
-        let mut min_value = header.min_value.clone();
-        let mut max_value = header.max_value.clone();
-        if ix.value < header.min_value || self.default_value == header.min_value {
-            min_value = ix.value.clone()
-        }
-        if ix.value > header.max_value || self.default_value == header.max_value {
-            max_value = ix.value.clone()
-        }
-
+    fn write_index_content(&mut self, num: usize, ix: FenseIndex<T>, offset: u32) -> Result<(), String> {
         let record_binary_size = self.default_value.get_binary_size();
         let after_header_offset_position = SortedIndexTableFragmentHeader::<T>::get_binary_size(record_binary_size) as u64;
         let index_size = ix.get_binary_size();
@@ -302,31 +336,137 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
         bin.write_bytes(bytes);
 
         let content = bin.buffer.freeze().to_vec();
-        file.write_all(&content).map_err(|e| e.to_string())?;
 
-        self.write_header(num, min_value, max_value)
-    }
-}
-
-pub struct SortedIndexTableFragment<T: Ord + Clone + BinarySizeable> {
-    pub files: SortedIndexFiles<T>,
-}
-
-impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexTableFragment<T> {
-
-    pub fn new(files: SortedIndexFiles<T>) -> Self {
-        SortedIndexTableFragment { files }
+        file.write_all(&content).map_err(|e| e.to_string())
     }
 
-    pub fn get_index_file_num_for_store(&mut self, ix: FenseIndex<T>) -> Result<usize, String> {
-        for i in 0..self.files.write_handles.len() {
-            let header = self.files.read_header(i)?;
-            if ix.value > header.min_value && ix.value < header.max_value {
-                return Ok(i);
+    pub fn write_offset(&mut self, num: usize, ix: FenseIndex<T>, offset: u32) -> Result<(), String> {
+        let header = self.read_header(num)?;
+        let records_count = header.records_count + 1;
+        let mut min_value = header.min_value.clone();
+        let mut max_value = header.max_value.clone();
+        if ix.value < header.min_value || self.default_value == header.min_value {
+            min_value = ix.value.clone()
+        }
+        if ix.value > header.max_value || self.default_value == header.max_value {
+            max_value = ix.value.clone()
+        }
+
+        self.write_index_content(num, ix, offset)?;
+
+        self.write_header(num, min_value, max_value, records_count)
+    }
+
+    pub fn clear_offset(&mut self, num: usize, offset: u32) -> Result<(), String> {
+        let header = self.read_header(num)?;
+        let records_count = header.records_count - 1;
+        let ix = FenseIndex { active: false, target: 0, value: self.default_value.clone() };
+
+        self.write_index_content(num, ix, offset)?;
+
+        self.write_header(num, header.min_value, header.max_value, records_count)
+    }
+
+    fn store(&mut self, ix: FenseIndex<T>) -> Result<(), String> {
+        let mut table_fragment = SortedIndexTableFragment::<T>::new(self);
+
+        match table_fragment.get_index_file_num_for_store(&ix)? {
+            FileNumberAssignment::Specific(num) => {
+                let header = self.read_header(num)?;
+                self.write_offset(num, ix, header.records_count)?;
+            }
+            FileNumberAssignment::NextAvailable => {
+                let next_num = self.fragment_count;
+                self.open_fragment(next_num)?;
+                self.write_offset(next_num, ix, 0)?;
+            },
+            FileNumberAssignment::Split(num) => {
+                let header = self.read_header(num)?;
+                let value_is_in_range = ix.value > header.min_value && ix.value < header.max_value;
+                if !value_is_in_range {
+                    return Err(String::from("Index value is not in range of the fragment. Cannot split the fragment."));
+                }
+
+                let next_num = self.fragment_count;
+                self.open_fragment(next_num)?;
+
+                // move all indexes bigger than ix to the next fragment
+                let mut next_fragment_min_value = self.default_value.clone();
+                let mut next_fragment_max_value = self.default_value.clone();
+                let mut next_fragment_records_count = 0;
+
+                for offset in 0..header.records_count {
+                    let old_ix = self.read_offset(num, offset)?;
+
+                    if old_ix.value != self.default_value {
+                        next_fragment_min_value = old_ix.value.clone();
+                    }
+
+                    if old_ix.value != self.default_value && old_ix.value > next_fragment_max_value {
+                        next_fragment_max_value = old_ix.value.clone();
+                    }
+
+                    if old_ix.value > ix.value {
+                        self.write_offset(next_num, old_ix, offset)?;
+                        self.clear_offset(num, offset)?;
+                        next_fragment_records_count += 1;
+                        break;
+                    }
+                }
+                self.write_header(next_num, next_fragment_min_value, next_fragment_max_value, next_fragment_records_count)?;
+
+
             }
         }
 
-        Err(format!("Index target {} is out of range", ix.target))
+        Ok(())
+    }
+}
+
+pub struct SortedIndexTableFragment<'a, T: Ord + Clone + Display + BinarySizeable> {
+    pub files: &'a mut SortedIndexFiles<T>,
+}
+
+#[derive(PartialEq)]
+#[derive(Debug)]
+pub enum FileNumberAssignment {
+    Specific(usize),
+    NextAvailable,
+    Split(usize),
+}
+
+impl<'a, T: Ord + Clone + Display + BinarySizeable> SortedIndexTableFragment<'a, T> {
+
+    pub fn new(files: &'a mut SortedIndexFiles<T>) -> Self {
+        SortedIndexTableFragment { files }
+    }
+
+    pub fn get_index_file_num_for_store(&mut self, ix: &FenseIndex<T>) -> Result<FileNumberAssignment, String> {
+        for i in 0..self.files.write_handles.len() {
+            let default_value = self.files.default_value.clone();
+            let header = self.files.read_header(i)?;
+
+            let value_is_in_range = ix.value > header.min_value && ix.value < header.max_value;
+
+            if header.records_count >= header.max_records_count && value_is_in_range {
+                // TODO: if ix value is in range, then we should split the file and store the index in the new file
+                return Ok(FileNumberAssignment::Split(i));
+            }
+
+            if header.min_value == default_value && header.max_value == default_value {
+                return Ok(FileNumberAssignment::Specific(i));
+            }
+
+            if header.records_count < header.max_records_count {
+                return Ok(FileNumberAssignment::Specific(i));
+            }
+
+            if value_is_in_range {
+                return Ok(FileNumberAssignment::Specific(i));
+            }
+        }
+
+        Ok(FileNumberAssignment::NextAvailable)
     }
 
     pub fn insert(&mut self, ix: FenseIndex<T>) -> Result<(), String> {
@@ -363,7 +503,7 @@ pub fn default_string_writer(index_value_size: usize) -> ValueWriter<String> {
     )
 }
 
-pub fn default_string_reader(index_value_size: usize) -> ValueReader<String> {
+pub fn default_string_fixed_size_reader(index_value_size: usize) -> ValueReader<String> {
     Box::new(
         move |file| {
             let position = file.stream_position().map_err(|e| e.to_string())?;
@@ -377,6 +517,16 @@ pub fn default_string_reader(index_value_size: usize) -> ValueReader<String> {
 
             let text_len = usize::from_be_bytes(bl);
             let max_possible_len = file_length - position;
+
+            if text_len == 0 {
+                file.seek(io::SeekFrom::Current(index_value_size as i64)).map_err(|e| e.to_string())?;
+                return Ok(String::from(""));
+            }
+            
+            if text_len != index_value_size {
+                return Err(String::from("Invalid text length. Text length is not equal to index value size."));
+            }
+
             if text_len > max_possible_len as usize {
                 return Err(String::from("Corrupted file. Text length is greater than file length."));
             }
@@ -448,13 +598,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_create_new_file_when_is_more_records_than_max_records_count_per_fragment() {
+        let folder = "test_folder/should_create_new_file_when_is_more_records_than_max_records_count_per_fragment";
+        if std::fs::exists(folder).unwrap() {
+            std::fs::remove_dir_all(folder).unwrap();
+        }
+
+        let read_value: ValueReader<String> = default_string_fixed_size_reader(200);
+        let write_value: ValueWriter<String> = default_string_writer(200);
+        let default_value = pad_or_truncate_string(String::from(""), 0 as char, 200);
+
+        let mut files = SortedIndexFiles::<String>::new(folder.to_string(), default_value, read_value, write_value, 3, 10, 1000).unwrap();
+        files.open_fragment(0).unwrap();
+
+        for i in 0..10_000 {
+            let value = format!("string value {i}");
+            let value = pad_or_truncate_string(value, ' ', 200);
+            let item: FenseIndex<String> = FenseIndex { active: true, target: (100 * i as u64), value };
+            files.store(item).unwrap();
+        }
+
+        let fragment_count = SortedIndexFiles::<String>::count_fragments_in_folder(String::from(folder)).unwrap();
+
+        assert_eq!(10, fragment_count);
+    }
+
+    #[test]
     fn should_find_index_file_num_for_index_value() {
         let folder = "test_folder/should_find_index_file_num_for_index_value";
         if std::fs::exists(folder).unwrap() {
             std::fs::remove_dir_all(folder).unwrap();
         }
 
-        let read_value: ValueReader<String> = default_string_reader(200);
+        let read_value: ValueReader<String> = default_string_fixed_size_reader(200);
         let write_value: ValueWriter<String> = default_string_writer(200);
 
         let default_value = String::from("");
@@ -477,17 +653,17 @@ mod tests {
 
         // files.write_header(0, String::from(("string value a - 0")), String::from(("string value k - 300"))).unwrap();
 
-        let mut table_fragment = SortedIndexTableFragment::<String>::new(files);
+        let mut table_fragment = SortedIndexTableFragment::<String>::new(&mut files);
         // let header = table_fragment.files.read_header(0).unwrap();
 
         let ix1 = FenseIndex { active: true, target: 100, value: String::from("string value d - 15") };
-        let index_file_num_1 = table_fragment.get_index_file_num_for_store(ix1).unwrap();
+        let index_file_num_1 = table_fragment.get_index_file_num_for_store(&ix1).unwrap();
 
         let ix2 = FenseIndex { active: true, target: 100, value: String::from("string value g - 20") };
-        let index_file_num_2 = table_fragment.get_index_file_num_for_store(ix2).unwrap();
+        let index_file_num_2 = table_fragment.get_index_file_num_for_store(&ix2).unwrap();
 
-        assert_eq!(index_file_num_1, 3);
-        assert_eq!(index_file_num_2, 6);
+        assert_eq!(index_file_num_1, FileNumberAssignment::Specific(0));
+        assert_eq!(index_file_num_2, FileNumberAssignment::Specific(0));
     }
 
     #[test]
@@ -497,7 +673,7 @@ mod tests {
             std::fs::remove_dir_all(folder).unwrap();
         }
 
-        let read_value: ValueReader<String> = default_string_reader(200);
+        let read_value: ValueReader<String> = default_string_fixed_size_reader(200);
         let write_value: ValueWriter<String> = default_string_writer(200);
 
         let default_value = String::from("");
@@ -565,7 +741,7 @@ mod tests {
             std::fs::remove_dir_all(folder).unwrap();
         }
 
-        let read_value: ValueReader<String> = default_string_reader(200);
+        let read_value: ValueReader<String> = default_string_fixed_size_reader(200);
         let write_value: ValueWriter<String> = default_string_writer(200);
 
         let mut files = SortedIndexFiles::<String>::new(folder.to_string(), String::from(""), read_value, write_value, 3, 10, 50).unwrap();
