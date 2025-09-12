@@ -28,6 +28,7 @@ impl BinarySizeable for u64 {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct FenseIndex<T: Ord + BinarySizeable> {
     pub active: bool,
     pub target: u64,
@@ -248,10 +249,12 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
         })
     }
 
-    fn read_offset(&mut self, num: usize, offset: u32) -> Result<FenseIndex<T>, String> {
+    fn read_offset(&mut self, num: usize, offset: u64, compute_value_default_size: ComputeValueDefaultSize) -> Result<FenseIndex<T>, String> {
         let record_binary_size = self.default_value.get_binary_size();
         let after_header_offset_position = SortedIndexTableFragmentHeader::<T>::get_binary_size(record_binary_size) as u64;
-        let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_prefix_binary_size() as u64;
+        // let offset_position = after_header_offset_position + (offset as u64) * FenseIndex::<T>::get_prefix_binary_size() as u64;
+        let record_binary_size = compute_value_default_size();
+        let offset_position = after_header_offset_position + offset * record_binary_size.total_size as u64;
 
         let handles = self.write_handles.as_mut_slice();
         let read_value = &self.read_value;
@@ -357,6 +360,21 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
         self.write_header(num, min_value, max_value, records_count)
     }
 
+    pub fn reorder_indexes(&mut self, num: usize, compute_value_default_size: ComputeValueDefaultSize) -> Result<(), String> {
+        let mut items = self.read_all_indexes(num, 0, compute_value_default_size)?;
+
+        items.retain(|ix| ix.active);
+        items.sort_by(|a, b| {
+            a.value.cmp(&b.value).then_with(|| a.target.cmp(&b.target))
+        });
+
+        for (i, ix) in items.into_iter().enumerate() {
+            self.write_offset(num, ix, i as u32)?;
+        }
+
+        Ok(())
+    }
+
     pub fn clear_offset(&mut self, num: usize, offset: u32) -> Result<(), String> {
         let header = self.read_header(num)?;
         let records_count = header.records_count - 1;
@@ -367,7 +385,7 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
         self.write_header(num, header.min_value, header.max_value, records_count)
     }
 
-    fn store(&mut self, ix: FenseIndex<T>) -> Result<(), String> {
+    fn store(&mut self, ix: FenseIndex<T>, compute_value_default_size: ComputeValueDefaultSize) -> Result<(), String> {
         let mut table_fragment = SortedIndexTableFragment::<T>::new(self);
 
         match table_fragment.get_index_file_num_for_store(&ix)? {
@@ -394,27 +412,34 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
                 let mut next_fragment_min_value = self.default_value.clone();
                 let mut next_fragment_max_value = self.default_value.clone();
                 let mut next_fragment_records_count = 0;
+                let mut old_fragment_records_count = header.records_count;
 
                 for offset in 0..header.records_count {
-                    let old_ix = self.read_offset(num, offset)?;
+                    let old_ix = self.read_offset(num, offset as u64, compute_value_default_size)?;
 
-                    if old_ix.value != self.default_value {
-                        next_fragment_min_value = old_ix.value.clone();
-                    }
+                    if old_ix.value > ix.value.clone() {
 
-                    if old_ix.value != self.default_value && old_ix.value > next_fragment_max_value {
-                        next_fragment_max_value = old_ix.value.clone();
-                    }
+                        if old_ix.value != self.default_value && next_fragment_min_value == self.default_value {
+                            next_fragment_min_value = old_ix.value.clone();
+                        }
 
-                    if old_ix.value > ix.value {
-                        self.write_offset(next_num, old_ix, offset)?;
+                        if old_ix.value != self.default_value && old_ix.value > next_fragment_max_value {
+                            next_fragment_max_value = old_ix.value.clone();
+                        }
+
+                        self.write_offset(next_num, old_ix, next_fragment_records_count)?;
                         self.clear_offset(num, offset)?;
+
                         next_fragment_records_count += 1;
-                        break;
+                        old_fragment_records_count -= 1;
                     }
                 }
+                self.write_header(num, header.min_value, ix.value.clone(), old_fragment_records_count)?;
                 self.write_header(next_num, next_fragment_min_value, next_fragment_max_value, next_fragment_records_count)?;
 
+                // TODO: reorder the indexes in the old fragment
+                self.reorder_indexes(num, compute_value_default_size)?;
+                self.write_offset(num, ix, old_fragment_records_count)?; // TODO: store a the end after reordering the indexes in the old fragment
 
             }
         }
@@ -522,7 +547,7 @@ pub fn default_string_fixed_size_reader(index_value_size: usize) -> ValueReader<
                 file.seek(io::SeekFrom::Current(index_value_size as i64)).map_err(|e| e.to_string())?;
                 return Ok(String::from(""));
             }
-            
+
             if text_len != index_value_size {
                 return Err(String::from("Invalid text length. Text length is not equal to index value size."));
             }
@@ -608,19 +633,44 @@ mod tests {
         let write_value: ValueWriter<String> = default_string_writer(200);
         let default_value = pad_or_truncate_string(String::from(""), 0 as char, 200);
 
-        let mut files = SortedIndexFiles::<String>::new(folder.to_string(), default_value, read_value, write_value, 3, 10, 1000).unwrap();
+        let mut files = SortedIndexFiles::<String>::new(folder.to_string(), default_value, read_value, write_value, 3, 5, 20).unwrap();
         files.open_fragment(0).unwrap();
 
-        for i in 0..10_000 {
+        let compute_size = move || {
+            let ix: FenseIndex<String> = FenseIndex { active: true, target: 0, value: pad_or_truncate_string(String::from(""), ' ', 200) };
+            ValueDefaultSizeInfo { prefix_size: FenseIndex::<String>::get_prefix_binary_size(), total_size: ix.get_binary_size() }
+        };
+
+        for i in 0..65 {
             let value = format!("string value {i}");
             let value = pad_or_truncate_string(value, ' ', 200);
             let item: FenseIndex<String> = FenseIndex { active: true, target: (100 * i as u64), value };
-            files.store(item).unwrap();
+
+            files.store(item, compute_size).unwrap();
         }
 
         let fragment_count = SortedIndexFiles::<String>::count_fragments_in_folder(String::from(folder)).unwrap();
+        assert_eq!(4, fragment_count);
 
-        assert_eq!(10, fragment_count);
+        let items0 = files.read_all_indexes(0, 0, compute_size).unwrap();
+        let items1 = files.read_all_indexes(1, 0, compute_size).unwrap();
+        let items2 = files.read_all_indexes(2, 0, compute_size).unwrap();
+        let items3 = files.read_all_indexes(3, 0, compute_size).unwrap();
+
+        let mut all: Vec<_> = [items0, items1, items2, items3]
+            .into_iter()
+            .flatten()
+            .map(|ix| ix.value)
+            .collect();
+
+        all.sort();
+
+        assert_eq!(65, all.len());
+
+        for i in 0..65 {
+            assert_eq!(format!("string value {i}"), all[i]);
+        }
+
     }
 
     #[test]
@@ -664,6 +714,39 @@ mod tests {
 
         assert_eq!(index_file_num_1, FileNumberAssignment::Specific(0));
         assert_eq!(index_file_num_2, FileNumberAssignment::Specific(0));
+    }
+
+    #[test]
+    fn should_read_offset_by_offset() {
+        let folder = "test_folder/should_read_offset_by_offset";
+        if std::fs::exists(folder).unwrap() {
+            std::fs::remove_dir_all(folder).unwrap();
+        }
+
+        let read_value: ValueReader<String> = default_string_fixed_size_reader(200);
+        let write_value: ValueWriter<String> = default_string_writer(200);
+
+        let default_value = String::from("");
+        let default_value = pad_or_truncate_string(default_value, ' ', 200);
+
+        let mut files = SortedIndexFiles::<String>::new(folder.to_string(), default_value, read_value, write_value, 3, 10, 500).unwrap();
+        files.open_fragment(0).unwrap();
+
+        for i in 0..500 {
+            let value = format!("string value {i}");
+            let value = pad_or_truncate_string(value, ' ', 200);
+            let item: FenseIndex<String> = FenseIndex { active: true, target: (100 * i as u64), value };
+            files.write_offset(0, item, i).unwrap();
+        }
+
+        for i in 0..500 {
+            let ix = files.read_offset(0, i, move || {
+                let ix: FenseIndex<String> = FenseIndex { active: true, target: 0, value: pad_or_truncate_string(String::from(""), ' ', 200) };
+                ValueDefaultSizeInfo { prefix_size: FenseIndex::<String>::get_prefix_binary_size(), total_size: ix.get_binary_size() }
+            }).unwrap();
+            assert_eq!(ix.value.trim(), format!("string value {i}"));
+            assert_eq!(ix.target, (100 * i as u64));
+        }
     }
 
     #[test]
