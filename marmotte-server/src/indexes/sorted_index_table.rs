@@ -255,8 +255,6 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
 
         let mut items = Vec::with_capacity(self.max_records_count_per_fragments as usize);
         for _ in 0..self.max_records_count_per_fragments {
-            let postion_on_loop_start = file.stream_position().map_err(|e| e.to_string())?;
-
             let mut buf = vec![0; record_binary_size.prefix_size];
             file.read(&mut buf).unwrap();
             let bytes = BytesMut::from(buf.as_slice());
@@ -264,10 +262,7 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
 
             let active = bin.read_bool()?;
             let target = bin.read_u64()?;
-            let postion_before_value = file.stream_position().map_err(|e| e.to_string())?;
             let value = read_value(file)?;
-            let postion_after_record = file.stream_position().map_err(|e| e.to_string())?;
-
             if active {
                 items.push(FenseIndex { active, target, value });
             }
@@ -309,17 +304,12 @@ impl<T: Ord + Clone + BinarySizeable> SortedIndexFiles<T> {
         let content = bin.buffer.freeze().to_vec();
         file.write_all(&content).map_err(|e| e.to_string())?;
 
-        let position = file.stream_position().map_err(|e| e.to_string())?;
-
-        file.sync_all().map_err(|e| e.to_string())?;
-
         self.write_header(num, min_value, max_value)
     }
 }
 
 pub struct SortedIndexTableFragment<T: Ord + Clone + BinarySizeable> {
     pub files: SortedIndexFiles<T>,
-    // pub header: SortedIndexTableFragmentHeader<T>
 }
 
 impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexTableFragment<T> {
