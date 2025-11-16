@@ -181,7 +181,8 @@ impl BinaryReader {
             Err(Cow::from("Failed to read bool value."))
         }
         else {
-            match &self.buffer[self.position] {
+            let value = &self.buffer[self.position];
+            match value {
                 0 => {
                     self.position += 1;
                     Ok(false)

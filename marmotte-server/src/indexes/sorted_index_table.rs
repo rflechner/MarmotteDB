@@ -1,4 +1,4 @@
-﻿use std::fmt::Display;
+use std::fmt::Display;
 use crate::binary::{BinaryReader, BinaryWriter};
 use bytes::{BufMut, Bytes, BytesMut};
 use std::fs::{exists, File, OpenOptions};
@@ -331,7 +331,7 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
         file.seek(io::SeekFrom::Start(offset_position)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
 
         let mut bin = BinaryWriter::with_capacity(FenseIndex::<T>::get_prefix_binary_size());
-        bin.write_bool(true);
+        bin.write_bool(ix.active);
         bin.write_u64(ix.target);
 
         let b = write_value(ix.value)?;
