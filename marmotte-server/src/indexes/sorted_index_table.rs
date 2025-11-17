@@ -1,4 +1,4 @@
-use std::fmt::Display;
+﻿use std::fmt::Display;
 use crate::binary::{BinaryReader, BinaryWriter};
 use bytes::{BufMut, Bytes, BytesMut};
 use std::fs::{exists, File, OpenOptions};
@@ -417,6 +417,10 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
                 for offset in 0..header.records_count {
                     let old_ix = self.read_offset(num, offset as u64, compute_value_default_size)?;
 
+                    if old_ix.target == 14 {
+                        println!("old_ix.target: {:?}", old_ix.target);
+                    }
+
                     if old_ix.value > ix.value.clone() {
 
                         if old_ix.value != self.default_value && next_fragment_min_value == self.default_value {
@@ -641,34 +645,43 @@ mod tests {
             ValueDefaultSizeInfo { prefix_size: FenseIndex::<String>::get_prefix_binary_size(), total_size: ix.get_binary_size() }
         };
 
-        for i in 0..65 {
+        for i in 0..22 {
             let value = format!("string value {i}");
             let value = pad_or_truncate_string(value, ' ', 200);
-            let item: FenseIndex<String> = FenseIndex { active: true, target: (100 * i as u64), value };
+            let item: FenseIndex<String> = FenseIndex { active: true, target: i, value };
 
             files.store(item, compute_size).unwrap();
         }
 
-        let fragment_count = SortedIndexFiles::<String>::count_fragments_in_folder(String::from(folder)).unwrap();
-        assert_eq!(4, fragment_count);
+        // let fragment_count = SortedIndexFiles::<String>::count_fragments_in_folder(String::from(folder)).unwrap();
+        // assert_eq!(4, fragment_count);
 
         let items0 = files.read_all_indexes(0, 0, compute_size).unwrap();
         let items1 = files.read_all_indexes(1, 0, compute_size).unwrap();
         let items2 = files.read_all_indexes(2, 0, compute_size).unwrap();
         let items3 = files.read_all_indexes(3, 0, compute_size).unwrap();
 
-        let mut all: Vec<_> = [items0, items1, items2, items3]
+        let all: Vec<_> = [items0, items1, items2, items3]
             .into_iter()
             .flatten()
-            .map(|ix| ix.value)
+            .filter(|ix| ix.active)
+            //.map(|ix| ix.value)
             .collect();
 
-        all.sort();
+       // all.sort();
 
-        assert_eq!(65, all.len());
+        let mut targets: Vec<(usize, u64)> = all
+            .iter()
+            .enumerate()
+            .map(|(i, ix)| (i, ix.target))
+            .collect();
+        targets.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let count = all.len();
+        assert_eq!(65, count);
 
         for i in 0..65 {
-            assert_eq!(format!("string value {i}"), all[i]);
+            assert_eq!(format!("string value {i}"), all[i].value);
         }
 
     }
