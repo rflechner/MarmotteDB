@@ -408,6 +408,9 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
                 let next_num = self.fragment_count;
                 self.open_fragment(next_num)?;
 
+                // start by reordering the indexes in the old fragment
+                self.reorder_indexes(num, compute_value_default_size)?;
+
                 // move all indexes bigger than ix to the next fragment
                 let mut next_fragment_min_value = self.default_value.clone();
                 let mut next_fragment_max_value = self.default_value.clone();
@@ -416,10 +419,6 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
 
                 for offset in 0..header.records_count {
                     let old_ix = self.read_offset(num, offset as u64, compute_value_default_size)?;
-
-                    if old_ix.target == 14 {
-                        println!("old_ix.target: {:?}", old_ix.target);
-                    }
 
                     if old_ix.value > ix.value.clone() {
 
@@ -441,9 +440,9 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
                 self.write_header(num, header.min_value, ix.value.clone(), old_fragment_records_count)?;
                 self.write_header(next_num, next_fragment_min_value, next_fragment_max_value, next_fragment_records_count)?;
 
-                // TODO: reorder the indexes in the old fragment
+                // reorder indexes after moving indexes to the next fragment
                 self.reorder_indexes(num, compute_value_default_size)?;
-                self.write_offset(num, ix, old_fragment_records_count)?; // TODO: store a the end after reordering the indexes in the old fragment
+                self.write_offset(num, ix, old_fragment_records_count)?;
 
             }
         }
@@ -645,7 +644,7 @@ mod tests {
             ValueDefaultSizeInfo { prefix_size: FenseIndex::<String>::get_prefix_binary_size(), total_size: ix.get_binary_size() }
         };
 
-        for i in 0..22 {
+        for i in 0..65 {
             let value = format!("string value {i}");
             let value = pad_or_truncate_string(value, ' ', 200);
             let item: FenseIndex<String> = FenseIndex { active: true, target: i, value };
@@ -661,7 +660,12 @@ mod tests {
         let items2 = files.read_all_indexes(2, 0, compute_size).unwrap();
         let items3 = files.read_all_indexes(3, 0, compute_size).unwrap();
 
-        let all: Vec<_> = [items0, items1, items2, items3]
+        let all: Vec<_> = [
+            items0,
+            items1,
+            items2,
+            items3
+        ]
             .into_iter()
             .flatten()
             .filter(|ix| ix.active)
