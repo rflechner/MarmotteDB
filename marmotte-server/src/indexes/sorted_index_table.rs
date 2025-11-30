@@ -663,9 +663,6 @@ mod tests {
             files.store(item, compute_size).unwrap();
         }
 
-        // let fragment_count = SortedIndexFiles::<String>::count_fragments_in_folder(String::from(folder)).unwrap();
-        // assert_eq!(4, fragment_count);
-
         let items0 = files.read_all_indexes(0, 0, compute_size).unwrap();
         let items1 = files.read_all_indexes(1, 0, compute_size).unwrap();
         let items2 = files.read_all_indexes(2, 0, compute_size).unwrap();
@@ -676,14 +673,10 @@ mod tests {
             items1,
             items2,
             items3
-        ]
-            .into_iter()
+        ].into_iter()
             .flatten()
             .filter(|ix| ix.active)
-            //.map(|ix| ix.value)
             .collect();
-
-       // all.sort();
 
         let mut targets: Vec<(usize, u64)> = all
             .iter()
