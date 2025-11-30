@@ -362,14 +362,24 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
 
     pub fn reorder_indexes(&mut self, num: usize, compute_value_default_size: ComputeValueDefaultSize) -> Result<(), String> {
         let mut items = self.read_all_indexes(num, 0, compute_value_default_size)?;
+        let header = self.read_header(num)?;
 
         items.retain(|ix| ix.active);
         items.sort_by(|a, b| {
             a.value.cmp(&b.value).then_with(|| a.target.cmp(&b.target))
         });
 
+        let mut max_offset = 0;
         for (i, ix) in items.into_iter().enumerate() {
-            self.write_offset(num, ix, i as u32)?;
+            // self.write_offset(num, ix, i as u32)?;
+            self.write_index_content(num, ix, i as u32)?;
+            max_offset = i as u32;
+        }
+
+        // fill the rest of the indexes with inactive indexes
+        for i in max_offset + 1 .. header.records_count {
+            let ix = FenseIndex { active: false, target: 0, value: self.default_value.clone() };
+            self.write_index_content(num, ix, i)?;
         }
 
         Ok(())
@@ -392,6 +402,7 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
             FileNumberAssignment::Specific(num) => {
                 let header = self.read_header(num)?;
                 self.write_offset(num, ix, header.records_count)?;
+                self.reorder_indexes(num, compute_value_default_size)?;
             }
             FileNumberAssignment::NextAvailable => {
                 let next_num = self.fragment_count;
@@ -417,16 +428,14 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
                 for offset in 0..header.records_count {
                     let old_ix = self.read_offset(num, offset as u64, compute_value_default_size)?;
 
-                    if old_ix.target == 14 {
-                        println!("old_ix.target: {:?}", old_ix.target);
-                    }
-
                     if old_ix.value > ix.value.clone() {
 
+                        // The first ix written to the next fragment will be the one with the smallest value.
                         if old_ix.value != self.default_value && next_fragment_min_value == self.default_value {
                             next_fragment_min_value = old_ix.value.clone();
                         }
 
+                        // The last ix written to the next fragment will be the one with the largest value.
                         if old_ix.value != self.default_value && old_ix.value > next_fragment_max_value {
                             next_fragment_max_value = old_ix.value.clone();
                         }
@@ -441,10 +450,8 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
                 self.write_header(num, header.min_value, ix.value.clone(), old_fragment_records_count)?;
                 self.write_header(next_num, next_fragment_min_value, next_fragment_max_value, next_fragment_records_count)?;
 
-                // TODO: reorder the indexes in the old fragment
                 self.reorder_indexes(num, compute_value_default_size)?;
-                self.write_offset(num, ix, old_fragment_records_count)?; // TODO: store a the end after reordering the indexes in the old fragment
-
+                self.write_offset(num, ix, old_fragment_records_count)?;
             }
         }
 
@@ -645,7 +652,7 @@ mod tests {
             ValueDefaultSizeInfo { prefix_size: FenseIndex::<String>::get_prefix_binary_size(), total_size: ix.get_binary_size() }
         };
 
-        for i in 0..22 {
+        for i in 0..65 {
             let value = format!("string value {i}");
             let value = pad_or_truncate_string(value, ' ', 200);
             let item: FenseIndex<String> = FenseIndex { active: true, target: i, value };
@@ -680,8 +687,14 @@ mod tests {
         let count = all.len();
         assert_eq!(65, count);
 
-        for i in 0..65 {
-            assert_eq!(format!("string value {i}"), all[i].value);
+        let mut expected_targets: Vec<String> = (0..65)
+            .map(|i| format!("string value {i}").to_string())
+            .collect();
+    expected_targets.sort();
+
+        for i in 0..expected_targets.len() {
+            let expected_target = expected_targets[i].clone();
+            assert_eq!(expected_target, all[i].value.trim());
         }
 
     }
