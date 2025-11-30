@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::fmt::format;
 use bytes::{BytesMut, BufMut, Bytes};
 
 pub struct BinaryWriter {
@@ -94,7 +96,6 @@ impl BinaryReader {
                     Err(_) => Err(&"Failed to decode UTF8 string.")
                 }
             }
-
         }
     }
 
@@ -175,12 +176,13 @@ impl BinaryReader {
         }
     }
 
-    pub fn read_bool(&mut self) -> Result<bool, &str> {
+    pub fn read_bool(&mut self) -> Result<bool, Cow<'static, str>> {
         if self.buffer.len() <= self.position {
-            Err("Failed to read bool value.")
+            Err(Cow::from("Failed to read bool value."))
         }
         else {
-            match &self.buffer[self.position] {
+            let value = &self.buffer[self.position];
+            match value {
                 0 => {
                     self.position += 1;
                     Ok(false)
@@ -189,7 +191,10 @@ impl BinaryReader {
                     self.position += 1;
                     Ok(true)
                 },
-                _ => Err("Failed to read bool value due to corrupted data.")
+                x => {
+                    let p = self.position;
+                    Err(Cow::Owned(format!("Failed to read bool value due to corrupted data '{x}' at position '{p}'.")))
+                }
             }
         }
     }
@@ -294,7 +299,7 @@ mod tests {
         assert_eq!(Ok(b), reader.read_bool());
         assert_eq!(Ok(s2), reader.read_string());
 
-        assert_eq!(Err("Failed to read bool value."), reader.read_bool());
+        assert_eq!(Err(Cow::from("Failed to read bool value.")), reader.read_bool());
 
         Ok(())
     }
