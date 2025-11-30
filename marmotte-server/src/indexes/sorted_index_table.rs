@@ -1,4 +1,4 @@
-﻿use std::fmt::Display;
+use std::fmt::Display;
 use crate::binary::{BinaryReader, BinaryWriter};
 use bytes::{BufMut, Bytes, BytesMut};
 use std::fs::{exists, File, OpenOptions};
@@ -419,6 +419,9 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
                 let next_num = self.fragment_count;
                 self.open_fragment(next_num)?;
 
+                // start by reordering the indexes in the old fragment
+                self.reorder_indexes(num, compute_value_default_size)?;
+
                 // move all indexes bigger than ix to the next fragment
                 let mut next_fragment_min_value = self.default_value.clone();
                 let mut next_fragment_max_value = self.default_value.clone();
@@ -668,7 +671,12 @@ mod tests {
         let items2 = files.read_all_indexes(2, 0, compute_size).unwrap();
         let items3 = files.read_all_indexes(3, 0, compute_size).unwrap();
 
-        let all: Vec<_> = [items0, items1, items2, items3]
+        let all: Vec<_> = [
+            items0,
+            items1,
+            items2,
+            items3
+        ]
             .into_iter()
             .flatten()
             .filter(|ix| ix.active)
