@@ -225,8 +225,8 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
                 max_records_count: self.max_records_count_per_fragments,
                 shift_threshold: self.shift_threshold,
                 min_value: min_value.clone(),
-                min_value_size: min_value_size,
-                max_value_size: max_value_size,
+                min_value_size,
+                max_value_size,
                 max_value: max_value.clone(),
                 records_count
         };
@@ -235,12 +235,15 @@ impl<T: Ord + Clone + Display + BinarySizeable> SortedIndexFiles<T> {
         let handles = self.write_handles.as_mut_slice();
         let file = &mut handles[num];
 
+        let min_value_size_32 = header.min_value_size as u32;
+        let max_value_size_32 = header.max_value_size as u32;
+
         file.seek(io::SeekFrom::Start(0)).map_err(|e| e.to_string()).map_err(|e| e.to_string())?;
         file.write(&header.max_records_count.to_be_bytes()).map_err(|e| e.to_string())?;
         file.write(&header.records_count.to_be_bytes()).map_err(|e| e.to_string())?;
         file.write(&header.shift_threshold.to_be_bytes()).map_err(|e| e.to_string())?;
-        file.write(&header.min_value_size.to_be_bytes()).map_err(|e| e.to_string())?;
-        file.write(&header.max_value_size.to_be_bytes()).map_err(|e| e.to_string())?;
+        file.write(&min_value_size_32.to_be_bytes()).map_err(|e| e.to_string())?;
+        file.write(&max_value_size_32.to_be_bytes()).map_err(|e| e.to_string())?;
 
         let b = write_value(min_value)?;
         let content = b.to_vec();
