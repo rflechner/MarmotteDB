@@ -8,12 +8,12 @@ mod document_tests;
 
 use std::time::Instant;
 
-use figlet_rs::FIGfont;
+use figlet_rs::FIGlet;
 use storage::disk_writer::DiskWriter;
 use storage::disk_reader::{DiskReader, DiskReaderOptions};
 
 fn main() {
-    let font = FIGfont::standard().unwrap();
+    let font = FIGlet::standard().unwrap();
     let figure = font.convert("Marmotte DB");
     assert!(figure.is_some());
     println!("{}", figure.unwrap());
