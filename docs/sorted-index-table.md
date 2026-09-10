@@ -1,11 +1,13 @@
-# Index trié par fragments
+# Fragment-based sorted index
 
-L’implémentation se trouve dans `marmotte-server/src/indexes/sorted_index_table.rs`.
-Elle conserve le principe initial : des fichiers `.ix` contenant chacun un index
-trié, avec une capacité maximale, une limite de déplacement à l’insertion et une
-compaction des fragments incomplets.
+[Version française](sorted-index-table.fr.md)
 
-## Utilisation dans le serveur
+The implementation is located in
+`marmotte-server/src/indexes/sorted_index_table.rs`. It retains the original
+principle: `.ix` files that each contain a sorted index, with a maximum capacity,
+an insertion shift limit, and compaction of incomplete fragments.
+
+## Server usage
 
 ```rust
 use crate::indexes::sorted_index_table::{
@@ -15,157 +17,151 @@ use crate::indexes::sorted_index_table::{
 fn example() -> Result<(), String> {
     let mut index = SortedIndexFiles::new(
         "indexes/demo/age".to_owned(),
-        0u32,                  // bornes d’un fragment vide
+        0u32,                  // bounds of an empty fragment
         default_u32_reader(),
         default_u32_writer(),
-        10,                    // limite de fragments incomplets
-        128,                   // limite de références décalées à l’insertion
-        1024,                  // capacité de chaque fragment
+        10,                    // incomplete fragment limit
+        128,                   // references shifted per insertion limit
+        1024,                  // capacity of each fragment
     )?;
 
     index.insert(FenseIndex::from_value(4096, 25))?;
     index.insert(FenseIndex::from_value(8192, 30))?;
     let matches = index.find(&25)?;
     assert_eq!(matches[0].target, 4096);
-    let interval = index.range(&20, &30)?; // bornes inclusives
-    assert_eq!(interval.len(), 2);        // dans un dossier initialement vide
+    let interval = index.range(&20, &30)?; // inclusive bounds
+    assert_eq!(interval.len(), 2);        // in an initially empty directory
     index.flush()?;
     Ok(())
 }
 ```
 
-`target` est une référence opaque vers les données, choisie par l’appelant. Le
-module ne lit pas les documents. Les codecs fournis prennent en charge `String`,
-`u32` et `u64`. D’autres types peuvent implémenter `Ord + Clone + BinarySizeable`
-avec un lecteur et un écrivain compatibles.
+`target` is an opaque reference to the data, chosen by the caller. The module
+does not read documents. The provided codecs support `String`, `u32`, and `u64`.
+Other types can implement `Ord + Clone + BinarySizeable` with a compatible reader
+and writer.
 
-`FenseIndex::from_value` calcule la taille automatiquement et crée une entrée
-active. Le constructeur historique `new(target, value, size)` reste disponible ;
-une taille incorrecte est refusée à l’écriture. La taille est toujours en octets,
-notamment pour les chaînes UTF-8. Les clés vides, zéro et la valeur par défaut sont
-des clés ordinaires. Les doublons sont conservés, même lorsque leur couple
-`(value, target)` est identique.
+`FenseIndex::from_value` calculates the size automatically and creates an active
+entry. The legacy `new(target, value, size)` constructor remains available; an
+incorrect size is rejected when writing. Size is always measured in bytes,
+particularly for UTF-8 strings. Empty keys, zero, and the default value are
+ordinary keys. Duplicates are preserved, even when their `(value, target)` pair
+is identical.
 
-Le constructeur ouvre et vérifie tous les fragments existants. La capacité et
-le seuil de déplacement doivent correspondre aux valeurs enregistrées. Un dossier
-appartient à un seul propriétaire : ne pas l’ouvrir depuis plusieurs instances
-ou processus simultanément.
+The constructor opens and verifies all existing fragments. Capacity and the
+shift threshold must match the stored values. A directory has a single owner:
+do not open it from multiple instances or processes simultaneously.
 
-## Insertion et organisation
+## Insertion and organization
 
-1. Parcourir les en-têtes en mémoire. Dans chaque fragment ayant de la place,
-   chercher par dichotomie la position dans l’ordre `(value, target)`.
-2. Si le nombre de références à décaler ne dépasse pas `shift_threshold`, ajouter
-   les octets de la valeur en fin de fichier et mettre à jour le suffixe de la
-   table de positions. Les anciennes valeurs ne sont pas réécrites.
-3. Si aucun fragment disponible ne convient, un fragment plein dont les bornes
-   encadrent strictement la valeur peut être scindé. Conformément à la tentative
-   initiale, les valeurs strictement supérieures vont dans un nouveau fragment.
-   Les autres restent dans l’ancien avec la nouvelle entrée.
-4. Sinon, créer un fragment. Les clés égales aux bornes d’un fragment plein sont
-   acceptées dans un autre fragment sans provoquer de dépassement.
-5. Lorsque le nombre de fragments non vides et non pleins dépasse
-   `max_incomplete_fragments_count`, les regrouper, les trier et les répartir en
-   fragments remplis au maximum. Les fragments déjà pleins sont exclus de cette
-   compaction automatique.
+1. Scan the in-memory headers. In each fragment with available space, use binary
+   search to find the position in `(value, target)` order.
+2. If the number of references to shift does not exceed `shift_threshold`, append
+   the value bytes to the end of the file and update the affected suffix of the
+   position table. Existing values are not rewritten.
+3. If no available fragment is suitable, a full fragment whose bounds strictly
+   contain the value can be split. In keeping with the initial experiment,
+   strictly greater values go into a new fragment. The remaining values stay in
+   the existing fragment together with the new entry.
+4. Otherwise, create a fragment. Keys equal to the bounds of a full fragment are
+   accepted in another fragment without overflowing it.
+5. When the number of non-empty, non-full fragments exceeds
+   `max_incomplete_fragments_count`, combine them, sort them, and redistribute
+   them into fragments filled to capacity. Already full fragments are excluded
+   from this automatic compaction.
 
-Le seuil peut valoir zéro : seules les insertions en fin de fragment évitent la
-création d’un fragment ou une scission. La capacité et la limite de fragments
-incomplets doivent être positives.
+The threshold can be zero: only insertions at the end of a fragment avoid
+creating or splitting a fragment. The capacity and incomplete fragment limit
+must be positive.
 
-Les numéros des fichiers indiquent leur ordre de création, pas un ordre global
-des valeurs. Les plages peuvent se chevaucher. `find` et `range` consultent tous
-les fragments dont les bornes correspondent, puis ordonnent les résultats.
-`all` retourne également une vue globalement triée.
+File numbers indicate creation order, not a global ordering of values. Ranges may
+overlap. `find` and `range` inspect every fragment with matching bounds, then sort
+the results. `all` also returns a globally sorted view.
 
-## Accès aux fragments et compaction
+## Fragment access and compaction
 
-- `fragment_count()` et `read_header(num)` exposent les métadonnées.
-- `read_fragment(num)` lit les entrées actives dans l’ordre des emplacements.
-- `read_offset(num, offset)` lit un emplacement logique, ou retourne `None`.
-- `write_offset(num, entry, offset)` remplace un emplacement et peut laisser le
-  fragment désordonné. Remplacer une entrée n’incrémente pas le compteur.
-- `clear_offset(num, offset)` invalide l’emplacement, actualise les bornes et peut
-  être appelé plusieurs fois sans diminuer plusieurs fois le compteur.
-- `reorder_indexes(num, prefix, start)` trie les références et élimine les trous.
-  Dans ce format, `prefix` vaut `FenseIndex::<T>::get_prefix_binary_size()` et
-  `start` vaut `read_header(num)?.compute_binary_size() as u64`.
-- `compact()` regroupe toutes les entrées et récupère l’espace des anciennes
-  valeurs inutiles. Les fichiers vides en fin de série sont supprimés ; les
-  fichiers vides intermédiaires sont réutilisables.
-- `flush()` appelle `sync_all` sur les fichiers ouverts.
+- `fragment_count()` and `read_header(num)` expose metadata.
+- `read_fragment(num)` reads active entries in slot order.
+- `read_offset(num, offset)` reads a logical slot or returns `None`.
+- `write_offset(num, entry, offset)` replaces a slot and may leave the fragment
+  unsorted. Replacing an entry does not increment the counter.
+- `clear_offset(num, offset)` invalidates the slot, refreshes the bounds, and can
+  be called repeatedly without decrementing the counter more than once.
+- `reorder_indexes(num, prefix, start)` sorts references and removes gaps. In this
+  format, `prefix` is `FenseIndex::<T>::get_prefix_binary_size()` and `start` is
+  `read_header(num)?.compute_binary_size() as u64`.
+- `compact()` combines all entries and reclaims space occupied by obsolete
+  values. Empty files at the end of the sequence are deleted; intermediate empty
+  files can be reused.
+- `flush()` calls `sync_all` on open files.
 
-Les emplacements logiques ne sont pas des identifiants stables : tri, insertion,
-scission et compaction peuvent les changer. Après une modification bas niveau qui
-laisse des trous ou modifie l’ordre, la prochaine insertion ou recherche concernée
-trie le fragment avant d’utiliser la dichotomie. Les bornes sont actualisées dès
-la modification.
+Logical slots are not stable identifiers: sorting, insertion, splitting, and
+compaction can change them. After a low-level modification that leaves gaps or
+changes the order, the next relevant insertion or search sorts the fragment
+before using binary search. Bounds are refreshed as soon as the modification is
+made.
 
-## Format disque MRMTIX02
+## MRMTIX02 on-disk format
 
-Tous les entiers sont en big-endian. Les fichiers se nomment `00000000.ix`,
-`00000001.ix`, etc., sans numéro manquant.
+All integers are big-endian. Files are named `00000000.ix`, `00000001.ix`, and so
+on, without missing numbers.
 
-L’en-tête occupe **24 octets** :
+The header occupies **24 bytes**:
 
-| Position | Taille | Contenu |
+| Position | Size | Contents |
 | --- | --- | --- |
-| 0 | 8 | Signature ASCII `MRMTIX02` |
-| 8 | 4 | Capacité en entrées (`u32`) |
-| 12 | 4 | Nombre d’entrées actives (`u32`) |
-| 16 | 4 | Seuil de déplacement (`u32`) |
-| 20 | 4 | Références compactes et triées : 0 ou 1 (`u32`) |
+| 0 | 8 | ASCII signature `MRMTIX02` |
+| 8 | 4 | Entry capacity (`u32`) |
+| 12 | 4 | Number of active entries (`u32`) |
+| 16 | 4 | Shift threshold (`u32`) |
+| 20 | 4 | Compact and sorted references: 0 or 1 (`u32`) |
 
-L’en-tête est suivi de `capacité × 21` octets réservés aux emplacements :
+The header is followed by `capacity × 21` bytes reserved for slots:
 
-| Position dans l’emplacement | Taille | Contenu |
+| Position within the slot | Size | Contents |
 | --- | --- | --- |
-| 0 | 1 | Actif : 0 ou 1 |
-| 1 | 8 | Cible (`u64`) |
-| 9 | 8 | Position absolue de la valeur dans le fichier (`u64`) |
-| 17 | 4 | Taille de la valeur en octets (`u32`) |
+| 0 | 1 | Active: 0 or 1 |
+| 1 | 8 | Target (`u64`) |
+| 9 | 8 | Absolute position of the value in the file (`u64`) |
+| 17 | 4 | Value size in bytes (`u32`) |
 
-Un emplacement inactif contient uniquement des zéros. Les valeurs commencent
-après cette table. Les chaînes sont en UTF-8 sans préfixe supplémentaire :
-leur longueur figure dans l’emplacement. Les nombres utilisent exactement 4 ou 8
-octets. Les valeurs minimale et maximale sont reconstruites à l’ouverture et
-mises en cache ; elles n’occupent plus un en-tête de taille variable.
+An inactive slot contains only zeros. Values begin after this table. Strings are
+UTF-8 without an additional prefix: their length is stored in the slot. Numbers
+use exactly 4 or 8 bytes. Minimum and maximum values are reconstructed when the
+file is opened and then cached; they no longer occupy a variable-sized header.
 
-Les anciens fichiers expérimentaux sont refusés sans être modifiés. Ils doivent
-être reconstruits à partir des données originales ; il n’y a pas de migration
-automatique d’un format dont les positions pouvaient déjà être incohérentes.
+Legacy experimental files are rejected without being modified. They must be
+rebuilt from the original data; there is no automatic migration from a format
+whose positions may already have been inconsistent.
 
-À l’ouverture, le module vérifie la signature, la configuration, les compteurs,
-les indicateurs, les positions et tailles des valeurs, et l’ordre lorsque le
-fragment est marqué trié. Une donnée tronquée ou un UTF-8 invalide produit une
-erreur. Ces contrôles ne remplacent pas une somme de contrôle des données.
+On opening, the module verifies the signature, configuration, counters, flags,
+value positions and sizes, and ordering when the fragment is marked as sorted.
+Truncated data or invalid UTF-8 produces an error. These checks are not a
+substitute for a data checksum.
 
-## Performances et limites de cette étape
+## Performance and limitations at this stage
 
-Les positions et les bornes restent en mémoire ; les clés sont lues sur disque
-à la demande. L’ouverture parcourt la table et les clés pour les vérifier. Une
-recherche dans un fragment trié utilise la dichotomie puis lit les résultats
-consécutifs. La sélection des fragments parcourt encore leurs métadonnées en
-mémoire. Une insertion écrit la nouvelle valeur et le suffixe de références
-concerné, mais reconstruit encore le vecteur des références en mémoire.
+Positions and bounds remain in memory; keys are read from disk on demand. Opening
+the index scans the table and keys to verify them. A search in a sorted fragment
+uses binary search and then reads consecutive results. Fragment selection still
+scans their in-memory metadata. An insertion writes the new value and the
+affected reference suffix, but still rebuilds the reference vector in memory.
 
-La scission matérialise le fragment concerné. Une compaction automatique
-matérialise les fragments incomplets concernés. `all` et la compaction manuelle
-peuvent matérialiser tout l’index en mémoire. Les scissions autour de la valeur
-insérée peuvent produire des fragments déséquilibrés. Cette version établit une
-base fonctionnelle ; elle ne prétend pas fournir un débit ou une latence mesurés
-pour une charge de production.
+Splitting materializes the affected fragment. Automatic compaction materializes
+the affected incomplete fragments. `all` and manual compaction may materialize
+the entire index in memory. Splits around the inserted value can produce
+unbalanced fragments. This version establishes a functional foundation; it does
+not claim measured throughput or latency for a production workload.
 
-Les écritures ordinaires ne font pas un `fsync` par insertion. Les fichiers
-temporaires de compaction sont entièrement écrits et synchronisés avant de
-remplacer les originaux ; une erreur d’encodage pendant leur préparation conserve
-les originaux. **Les opérations sur plusieurs fichiers ne sont pas atomiques.**
-Une coupure ou une erreur d’E/S pendant la publication d’une scission ou d’une
-compaction peut laisser une opération partielle, notamment des doublons. Les
-écritures de références et d’en-têtes ne sont pas non plus transactionnelles.
-Après une erreur d’E/S, ne pas continuer à utiliser l’instance comme si
-l’opération avait été annulée. Un journal de récupération et la coordination des
-écritures concurrentes restent des travaux distincts.
+Ordinary writes do not perform an `fsync` for every insertion. Temporary
+compaction files are fully written and synchronized before replacing the
+originals; an encoding error during their preparation preserves the originals.
+**Operations spanning multiple files are not atomic.** A crash or I/O error while
+publishing a split or compaction can leave a partial operation, including
+duplicates. Reference and header writes are not transactional either. After an
+I/O error, do not continue using the instance as if the operation had been rolled
+back. A recovery log and coordination of concurrent writes remain separate areas
+of work.
 
 ## Validation
 
@@ -173,10 +169,9 @@ l’opération avait été annulée. Un journal de récupération et la coordina
 cargo test --offline --manifest-path marmotte-server/Cargo.toml
 ```
 
-Les tests couvrent les cas d’origine, les chaînes variables et Unicode, les trous
-et remplacements, les doublons et bornes, les scissions, le seuil de déplacement,
-les recherches avec plages qui se chevauchent, les compactions et les réouvertures.
-Des séquences déterministes d’opérations pseudo-aléatoires sont comparées à un
-modèle indépendant en mémoire. Des fichiers volontairement tronqués ou mal formés
-vérifient les erreurs de lecture. Les répertoires de test sont uniques et isolés
-dans le répertoire temporaire du système.
+The tests cover the original cases, variable-length and Unicode strings, gaps
+and replacements, duplicates and bounds, splits, the shift threshold, searches
+across overlapping ranges, compactions, and reopenings. Deterministic sequences
+of pseudo-random operations are compared with an independent in-memory model.
+Deliberately truncated or malformed files verify read errors. Test directories
+are unique and isolated within the system temporary directory.
