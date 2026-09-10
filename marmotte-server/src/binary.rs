@@ -155,12 +155,14 @@ impl BinaryReader {
 
     pub fn read_u32(&mut self) -> Result<u32, &str> {
         let mut bl: [u8; 4] = Default::default();
+
         if self.buffer.len() <= self.position {
             Err("Failed to read value due to buffer overflow.")
         }
         else {
-            bl.copy_from_slice(&self.buffer.slice(self.position .. self.position+4));
-            self.position += 4;
+            let len = std::mem::size_of::<u32>();
+            bl.copy_from_slice(&self.buffer.slice(self.position .. self.position+len));
+            self.position += len;
             Ok(u32::from_be_bytes(bl))
         }
     }
