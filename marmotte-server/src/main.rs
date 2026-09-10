@@ -3,6 +3,8 @@ mod binary_serializer;
 mod storage;
 mod document;
 mod indexes;
+#[cfg(test)]
+mod document_tests;
 
 use std::time::Instant;
 
@@ -15,6 +17,11 @@ fn main() {
     let figure = font.convert("Marmotte DB");
     assert!(figure.is_some());
     println!("{}", figure.unwrap());
+
+    write_bench();
+}
+
+fn write_bench() {
 
     let mut data_writer_1 = DiskWriter::new("test1.data", 2048);
     let mut data_writer_2 = DiskWriter::new("test2.data", 2048);
@@ -45,7 +52,7 @@ fn main() {
             iter_start = Instant::now();
         }
     }
-    
+
     println!("Starting to write records one by one...");
 
     for i in 1..bench_length+1 {
