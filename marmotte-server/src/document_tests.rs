@@ -1,11 +1,9 @@
-use bytes::BytesMut;
 use serde_json::Value;
 
-use crate::document::document;
+use crate::document::Document;
 
-fn parse_json(json: &str) -> Value {
-    let payload = BytesMut::from(json);
-    serde_json::from_slice::<Value>(&payload).unwrap()
+fn parse_json(json: &str) -> Document {
+    Document::from_slice(json.as_bytes()).unwrap()
 }
 
 #[test]
@@ -18,8 +16,8 @@ fn property_value_should_be_string() -> Result<(), String> {
         "id": "id-4687"
     }"#,
     );
-    let r = document::get_property_value(json, String::from("name"));
-    assert_eq!([Value::String("John Doe".to_string())].to_vec(), r);
+    let r = json.property_values("name");
+    assert_eq!(vec![&Value::String("John Doe".to_string())], r);
     Ok(())
 }
 
@@ -37,8 +35,8 @@ fn property_value_of_level2_should_be_string() -> Result<(), String> {
         "id": "id-4687"
     }"#,
     );
-    let r = document::get_property_value(json, String::from("message.title"));
-    assert_eq!([Value::String("hello !".to_string())].to_vec(), r);
+    let r = json.property_values("message.title");
+    assert_eq!(vec![&Value::String("hello !".to_string())], r);
     Ok(())
 }
 
@@ -73,14 +71,13 @@ fn property_value_of_level2_should_be_string_array() -> Result<(), String> {
         "id": "id-4687"
     }"#,
     );
-    let r = document::get_property_value(json, String::from("messages.title"));
+    let r = json.property_values("messages.title");
     assert_eq!(
-        [
-            Value::String("hello !".to_string()),
-            Value::String("hello 2 !".to_string()),
-            Value::String("hello 4 !".to_string()),
-        ]
-        .to_vec(),
+        vec![
+            &Value::String("hello !".to_string()),
+            &Value::String("hello 2 !".to_string()),
+            &Value::String("hello 4 !".to_string()),
+        ],
         r
     );
     Ok(())
@@ -104,8 +101,8 @@ fn property_value_of_level3_should_be_bool() -> Result<(), String> {
         "id": "id-4687"
     }"#,
     );
-    let r = document::get_property_value(json, String::from("message.meta.deleted"));
-    assert_eq!([Value::Bool(true)].to_vec(), r);
+    let r = json.property_values("message.meta.deleted");
+    assert_eq!(vec![&Value::Bool(true)], r);
     Ok(())
 }
 
@@ -117,7 +114,7 @@ fn find_id_should_return_string_id() -> Result<(), String> {
         "age": 43,
         "id": "id-4687"
     }"#;
-    let r = document::find_id(BytesMut::from(data));
+    let r = Document::from_slice(data.as_bytes()).unwrap().id();
     assert_eq!(Some(String::from("id-4687")), r);
     Ok(())
 }
@@ -130,21 +127,21 @@ fn find_id_should_return_number_id() -> Result<(), String> {
         "age": 43,
         "id": 4687
     }"#;
-    let r = document::find_id(BytesMut::from(data));
+    let r = Document::from_slice(data.as_bytes()).unwrap().id();
     assert_eq!(Some(String::from("4687")), r);
     Ok(())
 }
 
 #[test]
-fn find_id_receiving_invalid_json_should_return_none() -> Result<(), String> {
+fn invalid_json_should_not_create_a_document() -> Result<(), String> {
     let data = r#"
     {
         "name": "John Doe",
         "age": 43,
         "id": 4687sa
     }"#;
-    let r = document::find_id(BytesMut::from(data));
-    assert_eq!(None, r);
+    let r = Document::from_slice(data.as_bytes());
+    assert!(r.is_err());
     Ok(())
 }
 
@@ -155,7 +152,7 @@ fn find_id_receiving_json_without_id_should_return_none() -> Result<(), String> 
         "name": "John Doe",
         "age": 43
     }"#;
-    let r = document::find_id(BytesMut::from(data));
+    let r = Document::from_slice(data.as_bytes()).unwrap().id();
     assert_eq!(None, r);
     Ok(())
 }

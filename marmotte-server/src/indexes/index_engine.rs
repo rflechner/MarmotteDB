@@ -1,5 +1,5 @@
-﻿use serde_json::Value;
 use crate::binary_serializer::TypeFlag;
+use crate::document::Document;
 
 pub enum IndexAlgo {
     SortedTable,
@@ -15,15 +15,13 @@ pub struct IndexDeclaration {
 }
 
 trait IndexEngine {
-
-    fn index_document(&self, index_declaration: IndexDeclaration, document: &Value);
-
+    fn index_document(&self, index_declaration: IndexDeclaration, document: &Document);
 }
 
 struct IndexEngineImpl;
 
 impl IndexEngine for IndexEngineImpl {
-    fn index_document(&self, index_declaration: IndexDeclaration, document: &Value) {
+    fn index_document(&self, index_declaration: IndexDeclaration, document: &Document) {
         todo!()
     }
 }
