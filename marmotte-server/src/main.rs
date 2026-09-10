@@ -1,45 +1,49 @@
+mod api;
 mod binary;
 mod binary_serializer;
-mod storage;
 mod document;
 mod indexes;
+mod model;
+mod storage;
 #[cfg(test)]
 mod document_tests;
-mod model;
 
-use std::path::PathBuf;
+use std::io;
 use std::time::Instant;
 
+use actix_web::{App, HttpServer, web};
+use api::AppState;
 use figlet_rs::FIGlet;
-use storage::disk_writer::DiskWriter;
 use storage::disk_reader::{DiskReader, DiskReaderOptions};
-use crate::document::Document;
-use crate::model::models::Database;
+use storage::disk_writer::DiskWriter;
 
-fn main() {
+#[actix_web::main]
+async fn main() -> io::Result<()> {
     let font = FIGlet::standard().unwrap();
     let figure = font.convert("Marmotte DB");
     assert!(figure.is_some());
     println!("{}", figure.unwrap());
 
-    let current_working_directory = std::env::current_dir().unwrap();
+    let current_working_directory = std::env::current_dir()?;
     println!("Current working directory: {:?}", current_working_directory);
-    
-    let databases_folder = PathBuf::from(current_working_directory).join("samples").join("databases");
-    
-    let db = Database::new(databases_folder.to_str().unwrap().to_string(), "test".to_string());
-    let collection_name = "test_collection";
-    let data = r#"
-    {
-        "name": "John Doe",
-        "age": 43,
-        "id": 468
-    }"#;
-    let document = Document::from_slice(data.as_bytes()).unwrap();
-    let record_location = db.store_document(collection_name, &document).unwrap();
-    println!("Record location: {:?}", record_location);
-    
-    // write_bench();
+
+    let databases_folder = current_working_directory
+        .join("samples")
+        .join("databases");
+    std::fs::create_dir_all(&databases_folder)?;
+
+    let state = web::Data::new(AppState::new(databases_folder));
+    let address = ("127.0.0.1", 7474);
+    println!("REST API listening on http://{}:{}", address.0, address.1);
+
+    HttpServer::new(move || {
+        App::new()
+            .app_data(state.clone())
+            .configure(api::configure)
+    })
+    .bind(address)?
+    .run()
+    .await
 }
 
 fn write_bench() {

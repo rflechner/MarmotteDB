@@ -1,5 +1,8 @@
 use crate::document::Document;
 use crate::storage::disk_writer::DiskWriter;
+use serde::Serialize;
+use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -14,7 +17,7 @@ pub struct Database {
     pub collections: Vec<DatabaseCollection>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct RecordLocation {
     pub page_file: String,
     pub offset: u64,
@@ -48,6 +51,16 @@ impl Database {
 
     pub fn get_database_folder(&self) -> PathBuf {
         PathBuf::from(&self.storage_root_folder).join(&self.name)
+    }
+
+    pub fn create(&self) -> io::Result<()> {
+        fs::create_dir(self.get_database_folder())
+    }
+
+    pub fn create_collection(&self, collection_name: &str) -> io::Result<PathBuf> {
+        let collection_folder = self.get_database_folder().join(collection_name);
+        fs::create_dir(&collection_folder)?;
+        Ok(collection_folder)
     }
 
     pub fn store_document(
