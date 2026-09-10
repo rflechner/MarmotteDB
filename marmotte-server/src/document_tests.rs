@@ -1,9 +1,27 @@
 use serde_json::Value;
 
+use crate::binary_serializer::BinarySerializer;
 use crate::document::Document;
 
 fn parse_json(json: &str) -> Document {
     Document::from_slice(json.as_bytes()).unwrap()
+}
+
+#[test]
+fn document_should_round_trip_through_binary_encoding() -> Result<(), String> {
+    let document = parse_json(
+        r#"{
+            "id": "document-42",
+            "active": true,
+            "tags": ["rust", "database"]
+        }"#,
+    );
+
+    let bytes = document.as_bytes().map_err(String::from)?;
+    let decoded = BinarySerializer::deserialize_json(&bytes)?;
+
+    assert_eq!(document.value(), &decoded);
+    Ok(())
 }
 
 #[test]

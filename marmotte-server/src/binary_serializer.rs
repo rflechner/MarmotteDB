@@ -101,6 +101,12 @@ impl BinarySerializer {
         BinarySerializer { writer:Box::new(wr) }
     }
 
+    pub fn serialize_value<'s>(value: &Value) -> Result<Bytes, &'s str> {
+        let mut serializer = BinarySerializer::new();
+        serializer.serialize_json_value(value, 0)?;
+        Ok(serializer.writer.buffer.split().freeze())
+    }
+
     pub fn serialize_json<'s>(json:&String) -> Result<Bytes, &'s str> {
 
         match serde_json::from_str::<Value>(json) {

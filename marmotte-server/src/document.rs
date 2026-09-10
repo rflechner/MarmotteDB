@@ -1,5 +1,8 @@
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::binary_serializer::BinarySerializer;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -22,6 +25,10 @@ impl Document {
 
     pub fn into_value(self) -> Value {
         self.value
+    }
+
+    pub fn as_bytes(&self) -> Result<Bytes, &'static str> {
+        BinarySerializer::serialize_value(&self.value)
     }
 
     pub fn id(&self) -> Option<String> {

@@ -7,11 +7,14 @@ mod indexes;
 mod document_tests;
 mod model;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use figlet_rs::FIGlet;
 use storage::disk_writer::DiskWriter;
 use storage::disk_reader::{DiskReader, DiskReaderOptions};
+use crate::document::Document;
+use crate::model::models::Database;
 
 fn main() {
     let font = FIGlet::standard().unwrap();
@@ -19,7 +22,24 @@ fn main() {
     assert!(figure.is_some());
     println!("{}", figure.unwrap());
 
-    write_bench();
+    let current_working_directory = std::env::current_dir().unwrap();
+    println!("Current working directory: {:?}", current_working_directory);
+    
+    let databases_folder = PathBuf::from(current_working_directory).join("samples").join("databases");
+    
+    let db = Database::new(databases_folder.to_str().unwrap().to_string(), "test".to_string());
+    let collection_name = "test_collection";
+    let data = r#"
+    {
+        "name": "John Doe",
+        "age": 43,
+        "id": 468
+    }"#;
+    let document = Document::from_slice(data.as_bytes()).unwrap();
+    let record_location = db.store_document(collection_name, &document).unwrap();
+    println!("Record location: {:?}", record_location);
+    
+    // write_bench();
 }
 
 fn write_bench() {
