@@ -5,6 +5,7 @@ mod document;
 mod indexes;
 #[cfg(test)]
 mod document_tests;
+mod model;
 
 use std::time::Instant;
 
