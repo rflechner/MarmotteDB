@@ -4,9 +4,11 @@ use serde_json::Value;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::document::Document;
-use crate::model::models::Database;
+use crate::model::models::{Database, RecordLocation};
 
 pub struct AppState {
     databases_root: PathBuf,
@@ -22,18 +24,44 @@ impl AppState {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct NamedResourceRequest {
+    /// Name of the resource to create.
+    #[schema(example = "customers")]
     name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct NamedResourceResponse {
+    /// Name of the created resource.
+    #[schema(example = "customers")]
     name: String,
 }
 
-#[derive(Serialize)]
+/// Location of a stored document inside a collection page file.
+#[derive(Serialize, ToSchema)]
+struct DocumentLocationResponse {
+    /// Page file the document was written to.
+    #[schema(example = "0000001.data")]
+    page_file: String,
+    /// Byte offset of the document record inside the page file.
+    #[schema(example = 2048)]
+    offset: u64,
+}
+
+impl From<RecordLocation> for DocumentLocationResponse {
+    fn from(location: RecordLocation) -> Self {
+        Self {
+            page_file: location.page_file,
+            offset: location.offset,
+        }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
 struct ApiError {
+    /// Human readable reason why the request was rejected.
+    #[schema(value_type = String, example = "Invalid database name")]
     error: &'static str,
 }
 
@@ -65,6 +93,19 @@ fn database(state: &AppState, name: &str) -> Result<Database, HttpResponse> {
     ))
 }
 
+/// Create a database.
+#[utoipa::path(
+    post,
+    path = "/databases",
+    tag = "databases",
+    request_body = NamedResourceRequest,
+    responses(
+        (status = 201, description = "Database created", body = NamedResourceResponse),
+        (status = 400, description = "Invalid database name", body = ApiError),
+        (status = 409, description = "Database already exists", body = ApiError),
+        (status = 500, description = "Database could not be created", body = ApiError),
+    )
+)]
 async fn create_database(
     state: web::Data<AppState>,
     request: web::Json<NamedResourceRequest>,
@@ -98,6 +139,21 @@ async fn create_database(
     }
 }
 
+/// Create a collection inside an existing database.
+#[utoipa::path(
+    post,
+    path = "/databases/{database}/collections",
+    tag = "collections",
+    params(("database" = String, Path, description = "Name of an existing database")),
+    request_body = NamedResourceRequest,
+    responses(
+        (status = 201, description = "Collection created", body = NamedResourceResponse),
+        (status = 400, description = "Invalid database or collection name", body = ApiError),
+        (status = 404, description = "Database does not exist", body = ApiError),
+        (status = 409, description = "Collection already exists", body = ApiError),
+        (status = 500, description = "Collection could not be created", body = ApiError),
+    )
+)]
 async fn create_collection(
     state: web::Data<AppState>,
     database_name: web::Path<String>,
@@ -142,6 +198,28 @@ async fn create_collection(
     }
 }
 
+/// Append a JSON document to an existing collection.
+#[utoipa::path(
+    post,
+    path = "/databases/{database}/collections/{collection}/documents",
+    tag = "documents",
+    params(
+        ("database" = String, Path, description = "Name of an existing database"),
+        ("collection" = String, Path, description = "Name of an existing collection"),
+    ),
+    request_body(
+        content = Object,
+        description = "Arbitrary JSON document",
+        content_type = "application/json",
+        example = json!({ "name": "John Doe", "age": 43, "id": 468 }),
+    ),
+    responses(
+        (status = 201, description = "Document stored", body = DocumentLocationResponse),
+        (status = 400, description = "Invalid database or collection name", body = ApiError),
+        (status = 404, description = "Database or collection does not exist", body = ApiError),
+        (status = 500, description = "Document could not be stored", body = ApiError),
+    )
+)]
 async fn add_document(
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
@@ -183,13 +261,34 @@ async fn add_document(
     };
 
     match db.store_document(&collection_name, &document) {
-        Ok(location) => HttpResponse::Created().json(location),
+        Ok(location) => HttpResponse::Created().json(DocumentLocationResponse::from(location)),
         Err(_) => error(
             actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to store document",
         ),
     }
 }
+
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Marmotte DB",
+        description = "REST API of the Marmotte DB document store.",
+    ),
+    paths(create_database, create_collection, add_document),
+    components(schemas(
+        NamedResourceRequest,
+        NamedResourceResponse,
+        DocumentLocationResponse,
+        ApiError
+    )),
+    tags(
+        (name = "databases", description = "Database lifecycle"),
+        (name = "collections", description = "Collection lifecycle"),
+        (name = "documents", description = "Document storage"),
+    )
+)]
+pub struct ApiDoc;
 
 pub fn configure(config: &mut web::ServiceConfig) {
     config
@@ -201,6 +300,9 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .route(
             "/databases/{database}/collections/{collection}/documents",
             web::post().to(add_document),
+        )
+        .service(
+            SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", ApiDoc::openapi()),
         );
 }
 
@@ -296,6 +398,32 @@ mod tests {
                 .join("test/test_collection/0000001.data")
                 .is_file()
         );
+    }
+
+    #[actix_web::test]
+    async fn openapi_document_describes_every_route() {
+        let root = TestRoot::new();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState::new(root.path.clone())))
+                .configure(configure),
+        )
+        .await;
+
+        let request = test::TestRequest::get()
+            .uri("/api-docs/openapi.json")
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let spec: Value = test::read_body_json(response).await;
+        assert!(spec["paths"]["/databases"]["post"].is_object());
+        assert!(spec["paths"]["/databases/{database}/collections"]["post"].is_object());
+        assert!(
+            spec["paths"]["/databases/{database}/collections/{collection}/documents"]["post"]
+                .is_object()
+        );
+        assert!(spec["components"]["schemas"]["DocumentLocationResponse"].is_object());
     }
 
     #[actix_web::test]

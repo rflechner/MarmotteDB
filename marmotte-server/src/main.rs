@@ -35,6 +35,14 @@ async fn main() -> io::Result<()> {
     let state = web::Data::new(AppState::new(databases_folder));
     let address = ("127.0.0.1", 7474);
     println!("REST API listening on http://{}:{}", address.0, address.1);
+    println!(
+        "OpenAPI document on http://{}:{}/api-docs/openapi.json",
+        address.0, address.1
+    );
+    println!(
+        "Swagger UI on http://{}:{}/swagger-ui/",
+        address.0, address.1
+    );
 
     HttpServer::new(move || {
         App::new()

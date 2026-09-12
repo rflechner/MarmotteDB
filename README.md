@@ -8,6 +8,28 @@
 > MarmotteDB is not finished. It is a proof of concept (POC) under active
 > development and is not ready for production use.
 
+## REST API
+
+Start the server from the `marmotte-server` folder:
+
+```powershell
+cargo run
+```
+
+It listens on `http://127.0.0.1:7474` and exposes three endpoints:
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| POST | `/databases` | Create a database |
+| POST | `/databases/{database}/collections` | Create a collection |
+| POST | `/databases/{database}/collections/{collection}/documents` | Store a JSON document |
+
+The OpenAPI 3.1 specification is generated at compile time from the handlers by
+[utoipa](https://github.com/juhaku/utoipa), so it cannot drift from the code.
+
+- Swagger UI: <http://127.0.0.1:7474/swagger-ui/>
+- OpenAPI document: <http://127.0.0.1:7474/api-docs/openapi.json>
+
 ## Indexing algorithms
 
 MarmotteDB is intended, among other things, to experiment with and compare
